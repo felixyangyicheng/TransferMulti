@@ -1,0 +1,6 @@
+@TransferMulti.srv_HostAddress = http://localhost:5262
+
+GET {{TransferMulti.srv_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -3,7 +3,7 @@ services:
   api:
     container_name: file_transfert_srv
     build:
-      context: ./OneTransfert.srv
+      context: ./TransfertMulti.srv
       dockerfile: Dockerfile
     image: file_transfert_srv      
     ports: 
