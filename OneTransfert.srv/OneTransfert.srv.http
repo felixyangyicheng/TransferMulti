@@ -1,0 +1,6 @@
+@OneTransfert.srv_HostAddress = http://localhost:5262
+
+GET {{OneTransfert.srv_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

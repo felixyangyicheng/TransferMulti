@@ -1,0 +1,18 @@
+version: '1'
+services:
+  api:
+    container_name: file_transfert_srv
+    build:
+      context: ./OneTransfert.srv
+      dockerfile: Dockerfile
+    image: file_transfert_srv      
+    ports: 
+      - '5042:80'
+      - '7050:443'
+    restart: always
+    networks:
+      - backend
+      - frontend  
+networks:
+  backend:
+  frontend:

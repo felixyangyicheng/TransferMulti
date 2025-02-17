@@ -1,0 +1,13 @@
+﻿
+@inherits LayoutComponentBase
+
+@inject NavigationManager NavigationManager
+@inject IConfiguration Configuration
+@inject IDialogService DialogService
+@inject IHttpClientFactory HttpClientFactory;
+
+<MudThemeProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+<UpdateAvailableDetector />
+@Body
