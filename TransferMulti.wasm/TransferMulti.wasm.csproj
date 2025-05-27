@@ -9,22 +9,22 @@
 
   <ItemGroup>
     <PackageReference Include="BootstrapBlazor.WebAPI" Version="9.0.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="9.0.3" />
-    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="9.0.3" PrivateAssets="all" />
-	  <PackageReference Include="CodeBeam.MudBlazor.Extensions" Version="8.0.0" />
-	  <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="9.0.3" />
-	  <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.3" />
-	  <PackageReference Include="JiuLing.CommonLibs" Version="1.7.2" />
-	  <PackageReference Include="Markdig" Version="0.40.0" />
-	  <PackageReference Include="MudBlazor" Version="8.3.0" />
-	  <PackageReference Include="MudBlazor.Markdown" Version="8.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="9.0.5" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="9.0.5" PrivateAssets="all" />
+	  <PackageReference Include="CodeBeam.MudBlazor.Extensions" Version="8.2.1" />
+	  <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="9.0.5" />
+	  <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.5" />
+	  <PackageReference Include="JiuLing.CommonLibs" Version="1.7.5" />
+	  <PackageReference Include="Markdig" Version="0.41.1" />
+	  <PackageReference Include="MudBlazor" Version="8.6.0" />
+	  <PackageReference Include="MudBlazor.Markdown" Version="8.6.0" />
 	  <PackageReference Include="ReactorBlazorQRCodeScanner" Version="1.0.10" />
 	  <PackageReference Include="ZXingBlazor" Version="1.1.5" />
 	  <PackageReference Include="Densen.Extensions.BootstrapBlazor" Version="*" />
 	  <PackageReference Include="Densen.Component.Blazor" Version="*" />
 	  <PackageReference Include="BlazorTypewriter" Version="1.1.0" />
-	  <PackageReference Include="BootstrapBlazor" Version="9.4.8" />
-	  <PackageReference Include="BootstrapBlazor.Markdown" Version="9.0.1" />
+	  <PackageReference Include="BootstrapBlazor" Version="9.6.4" />
+	  <PackageReference Include="BootstrapBlazor.Markdown" Version="9.0.2" />
   </ItemGroup>
 
   <ItemGroup>
