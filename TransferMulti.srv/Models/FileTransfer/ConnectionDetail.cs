@@ -5,7 +5,7 @@ internal class ConnectionDetail
     public SenderInfo Sender { get; set; }
     public ReceiverInfo? Receiver { get; set; }
     public DateTime ExpirationTime { get; set; }
-    public ConnectionDetail(int roomId, SenderInfo sender, ReceiverInfo? receiver)
+    public ConnectionDetail(int roomId, SenderInfo sender, ReceiverInfo? receiver, DateTime? expiration)
     {
         RoomId = roomId;
         Sender = sender;

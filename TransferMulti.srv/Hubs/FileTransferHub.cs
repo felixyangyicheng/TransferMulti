@@ -1,233 +1,135 @@
 ﻿using JiuLing.CommonLibs.ExtensionMethods;
 using Microsoft.AspNetCore.SignalR;
-using System;
-using JiuLing.CommonLibs;
-using TransferMulti.srv.Models;
+using System.Collections.Concurrent;
 using TransferMulti.srv.Models.FileTransfer;
 
 namespace OnTransfert.srv.Hubs;
+
 public class FileTransferHub : Hub
 {
-    private static readonly object Locker = new();
-    private static readonly List<ConnectionDetail> Connections = new();
+    private static readonly ConcurrentDictionary<int, ConnectionDetail> Connections = new();
+    private static readonly SemaphoreSlim ConcurrencyLock = new(3, 3); // 允许3个并行传输
+    private static readonly TimeSpan RoomExpiration = TimeSpan.FromMinutes(5);
 
-    public FileTransferHub()
+    [HubMethodName("CreateConversation")]
+    public async Task<int> CreateConversationAsync()
     {
-
-    }
-
-    [HubMethodName("CreateRoom")]
-    public Task<int> CreateRoomAsync()
-    {
-        int roomId;
-        lock (Locker)
+        await ConcurrencyLock.WaitAsync();
+        try
         {
-            //supprimer les salles expirées
-            var time = DateTime.Now;
-            Connections.RemoveAll(x => x.ExpirationTime.Subtract(time).TotalSeconds < 0);
+            CleanExpiredRooms();
 
-            // supprimer les salles dont la connexion est etablie
-            Connections.RemoveAll(x => x.Sender.Id == Context.ConnectionId);
-
+            int conversationId;
             do
             {
-                roomId = Convert.ToInt32(RandomUtils.GetOneByLength(4));
-            } while (Connections.Any(x => x.RoomId == roomId));
+                conversationId = Random.Shared.Next(1000, 9999);
+            } while (Connections.ContainsKey(conversationId));
 
             var sender = new SenderInfo(Context.ConnectionId);
-            Connections.Add(new ConnectionDetail(roomId, sender, null));
+            var expiration = DateTime.Now.Add(RoomExpiration);
+            Connections[conversationId] = new ConnectionDetail(
+                conversationId,
+                sender,
+                null,
+                expiration
+            );
+
+            return conversationId;
         }
-        return Task.FromResult(roomId);
+        finally
+        {
+            ConcurrencyLock.Release();
+        }
     }
 
-    [HubMethodName("JoinRoom")]
-    public async Task<string> JoinRoomAsync(int roomId)
+    [HubMethodName("JoinConversation")]
+    public async Task<string> JoinConversationAsync(int conversationId)
     {
-        string senderId = "";
-        lock (Locker)
-        {
-            // supprimer la salle dont lien est établi
-            Connections.ForEach(connection =>
-            {
-                if (connection.Receiver != null && connection.Receiver.Id == Context.ConnectionId)
-                {
-                    connection.Receiver = null;
-                }
-            });
+        if (!Connections.TryGetValue(conversationId, out var connection))
+            return "对话不存在";
 
-            var connection = Connections.FirstOrDefault(x => x.RoomId == roomId);
-            if (connection == null)
-            {
-                return "Numéro de salle n'existe pas";
-            }
-            if (connection.Receiver != null)
-            {
-                return "salle déjà occupée";
-            }
-            senderId = connection.Sender.Id;
-            var receiver = new ReceiverInfo(Context.ConnectionId);
-            Connections.First(x => x.RoomId == roomId).Receiver = receiver;
-        }
+        if (connection.Receiver != null)
+            return "对话已被占用";
 
-        await Clients.Client(senderId).SendAsync("ReceiverJoin");
+        connection.Receiver = new ReceiverInfo(Context.ConnectionId);
+        connection.ExpirationTime = DateTime.Now.Add(RoomExpiration);
+
+        await Clients.Client(connection.Sender.Id).SendAsync("ReceiverJoined", conversationId);
         return "ok";
     }
 
     [HubMethodName("SendSenderIceCandidate")]
-    public async Task<string> SendSenderIceCandidateAsync(string candidate)
+    public async Task<string> SendSenderIceCandidateAsync(int conversationId, string candidate)
     {
-        string receiverId;
-        lock (Locker)
-        {
-            var connection = Connections.FirstOrDefault(x => x.Sender.Id == Context.ConnectionId);
-            if (connection == null)
-            {
-                return "salle n'existe pas ";
-            }
-            if (connection.Sender.Candidate != null)
-            {
-                return "création de salle dupliquée";
-            }
-            if (connection.Receiver == null)
-            {
-                return " en attente d'initialisation destinataire ";
-            }
-            receiverId = connection.Receiver.Id;
-            connection.Sender.Candidate = candidate;
-        }
-        await Clients.Client(receiverId).SendAsync("ReceiveSenderIceCandidate", candidate);
+        if (!Connections.TryGetValue(conversationId, out var connection))
+            return "对话不存在";
+
+        if (connection.Receiver == null)
+            return "接收方未加入";
+
+        await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveSenderIceCandidate", candidate);
         return "ok";
     }
 
     [HubMethodName("SendReceiverIceCandidate")]
-    public async Task<string> SendReceiverIceCandidateAsync(string candidate)
+    public async Task<string> SendReceiverIceCandidateAsync(int conversationId, string candidate)
     {
-        string senderId = "";
-        lock (Locker)
-        {
-            var connection = Connections.FirstOrDefault(x => x.Receiver?.Id == Context.ConnectionId);
-            if (connection == null)
-            {
-                return "salle n'existe pas ";
-            }
-            if (connection.Receiver == null)
-            {
-                return "veuillez rejoindre une salle";
-            }
-            if (connection.Receiver.Candidate != null)
-            {
-                return " création de lien dupliqué non autorisé";
-            }
-            connection.Receiver.Candidate = candidate;
-            senderId = connection.Sender.Id;
-        }
-        await Clients.Client(senderId).SendAsync("ReceiveReceiverIceCandidate", candidate);
+        if (!Connections.TryGetValue(conversationId, out var connection))
+            return "对话不存在";
+
+        await Clients.Client(connection.Sender.Id).SendAsync("ReceiveReceiverIceCandidate", candidate);
         return "ok";
     }
 
     [HubMethodName("SendOffer")]
-    public async Task<string> SendOfferAsync(string offer)
+    public async Task<string> SendOfferAsync(int conversationId, string offer)
     {
-        string receiverId;
-        lock (Locker)
-        {
-            var connection = Connections.FirstOrDefault(x => x.Sender.Id == Context.ConnectionId);
-            if (connection == null)
-            {
-                return "salle n'existe pas";
-            }
-            if (connection.Sender.Offer != null)
-            {
-                return "création de lien dupliquée";
-            }
-            if (connection.Receiver == null)
-            {
-                return " en attente d'initialisation destinateur ";
-            }
-            receiverId = connection.Receiver.Id;
-            connection.Sender.Offer = offer;
-        }
-        await Clients.Client(receiverId).SendAsync("ReceiveOffer", offer);
+        if (!Connections.TryGetValue(conversationId, out var connection))
+            return "对话不存在";
+
+        await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveOffer", offer);
         return "ok";
     }
 
     [HubMethodName("SendAnswer")]
-    public async Task<string> SendAnswerAsync(string answer)
+    public async Task<string> SendAnswerAsync(int conversationId, string answer)
     {
-        string senderId = "";
-        lock (Locker)
-        {
-            var connection = Connections.FirstOrDefault(x => x.Receiver?.Id == Context.ConnectionId);
-            if (connection == null)
-            {
-                return "salle n'existe pas";
-            }
+        if (!Connections.TryGetValue(conversationId, out var connection))
+            return "对话不存在";
 
-            if (connection.Receiver == null)
-            {
-                return "veuillez rejoindre une salle";
-            }
-
-            if (connection.Receiver.Answer != null)
-            {
-                return "création lien dupliqué";
-            }
-            connection.Receiver.Answer = answer;
-            senderId = connection.Sender.Id;
-        }
-        await Clients.Client(senderId).SendAsync("ReceiveAnswer", answer);
-        return "ok";
-    }
-
-    [HubMethodName("SwitchConnectionType")]
-    public async Task<string> SwitchConnectionTypeAsync()
-    {
-        string receiverId;
-        lock (Locker)
-        {
-            var connection = Connections.FirstOrDefault(x => x.Sender.Id == Context.ConnectionId);
-            if (connection == null)
-            {
-                return "salle n'existe pas";
-            }
-            if (connection.Receiver == null)
-            {
-                return "en attente d'initialisation de destinataire";
-            }
-            receiverId = connection.Receiver.Id;
-        }
-        await Clients.Client(receiverId).SendAsync("ReceiveSwitchConnectionType");
+        await Clients.Client(connection.Sender.Id).SendAsync("ReceiveAnswer", answer);
         return "ok";
     }
 
     [HubMethodName("SendFileInfo")]
-    public async Task SendFileInfoAsync(string fileInfo)
+    public async Task SendFileInfoAsync(int conversationId, string fileInfo)
     {
-        string receiverId = Connections.FirstOrDefault(x => x.Sender.Id == Context.ConnectionId)?.Receiver?.Id ?? "";
-        if (receiverId.IsNotEmpty())
-        {
-            await Clients.Client(receiverId).SendAsync("ReceiveFileInfo", fileInfo);
-        }
+        if (Connections.TryGetValue(conversationId, out var connection))
+            await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveFileInfo", fileInfo);
     }
 
     [HubMethodName("SendFile")]
-    public async Task SendFileAsync(byte[] buffer)
+    public async Task SendFileAsync(int conversationId, byte[] buffer)
     {
-        string receiverId = Connections.FirstOrDefault(x => x.Sender.Id == Context.ConnectionId)?.Receiver?.Id ?? "";
-        if (receiverId.IsNotEmpty())
-        {
-            await Clients.Client(receiverId).SendAsync("ReceiveFile", buffer);
-        }
+        if (Connections.TryGetValue(conversationId, out var connection))
+            await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveFile", buffer);
     }
 
     [HubMethodName("SendFileSent")]
-    public async Task SendFileSentAsync()
+    public async Task SendFileSentAsync(int conversationId)
     {
-        string receiverId = Connections.FirstOrDefault(x => x.Sender.Id == Context.ConnectionId)?.Receiver?.Id ?? "";
-        if (receiverId.IsNotEmpty())
-        {
-            await Clients.Client(receiverId).SendAsync("ReceiveFileSent");
-        }
+        if (Connections.TryGetValue(conversationId, out var connection))
+            await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveFileSent");
     }
 
+    private void CleanExpiredRooms()
+    {
+        var expiredIds = Connections
+            .Where(x => x.Value.ExpirationTime < DateTime.Now)
+            .Select(x => x.Key)
+            .ToList();
+
+        foreach (var id in expiredIds)
+            Connections.TryRemove(id, out _);
+    }
 }
