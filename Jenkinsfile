@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     environment {
-        PROJECT_DIR = 'TransfertMulti.srv'
+        PROJECT_DIR = 'TransferMulti.srv'
     }
 
     stages {
