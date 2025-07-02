@@ -41,7 +41,7 @@ pipeline {
                     sh 'docker stop transfert_server || true'
                     sh 'docker rm transfert_server || true'
                     
-                    sh "docker run -d -p 33333:80 --name=transfert_server one_transfer_srv:latest"
+                    sh "docker run -d -p 33333:80 --name=transfert_server transfer_multi_srv:latest"
                 }
             }
         }
