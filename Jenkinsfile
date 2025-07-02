@@ -2,46 +2,53 @@ pipeline {
     agent any
 
     environment {
-        COMPOSE_PROJECT_DIR = 'Realtime-D3-signalR-dotnet-postgresql'
+        PROJECT_DIR = 'TransferMulti.srv'
     }
 
     stages {
-        stage('拉取代码') {
+        stage('Checkout Code') {
             steps {
-                echo "--------------- 拉取 Git 仓库代码 ---------------"
-                checkout scm
-            }
-        }
-
-        stage('获取 Git 提交哈希') {
-            steps {
-                script {
-                    dir(env.COMPOSE_PROJECT_DIR) {
+                echo "--------------- Récupération du code ---------------"
+                checkout scm  // Récupère le code du contrôle de source Jenkins
+                dir(env.PROJECT_DIR) {
+                    // Maintenant dans le contexte du dépôt Git
+                    script {
                         GITHASH = sh(
                             script: 'git rev-parse --short HEAD',
                             returnStdout: true
                         ).trim()
-                        echo "Git 哈希: ${GITHASH}"
                     }
+                    echo "Git Hash: ${GITHASH}"
                 }
             }
         }
 
-        stage('使用 docker-compose 启动服务') {
+        stage('Build Docker Image') {
             steps {
-                echo "--------------- 使用 docker-compose 部署服务 ---------------"
-                dir(env.COMPOSE_PROJECT_DIR) {
-                    sh 'docker-compose down || true'  // 关闭旧容器
-                    sh 'docker-compose pull'          // 拉取最新镜像（如果使用远程镜像）
-                    sh 'docker-compose build'         // 构建所有服务
-                    sh 'docker-compose up -d'         // 后台启动所有服务
+                echo "--------------- Construction de l'image Docker ---------------"
+                dir(env.PROJECT_DIR) {
+                    sh "docker build -t transfer_multi_srv:${GITHASH} ."
+                    sh "docker tag transfer_multi_srv:${GITHASH} transfer_multi_srv:latest"
                 }
             }
         }
 
-        stage('清理旧镜像') {
+        stage('Deploy Container') {
             steps {
-                echo "--------------- 清理未使用的 Docker 镜像 ---------------"
+                echo "--------------- Déploiement du conteneur ---------------"
+                script {
+                    // Arrêt et suppression sécurisés de l'ancien conteneur
+                    sh 'docker stop transfert_server || true'
+                    sh 'docker rm transfert_server || true'
+                    
+                    sh "docker run -d -p 33333:80 --name=transfert_server transfer_multi_srv:latest"
+                }
+            }
+        }
+
+        stage('Cleanup') {
+            steps {
+                echo "--------------- Nettoyage des ressources ---------------"
                 sh 'docker image prune -f'
             }
         }
@@ -49,10 +56,8 @@ pipeline {
 
     post {
         always {
-            echo "--------------- 显示当前 Docker 镜像状态 ---------------"
+            echo "--------------- État final des images Docker ---------------"
             sh 'docker images'
-            echo "--------------- 显示当前运行的容器 ---------------"
-            sh 'docker ps -a'
         }
     }
 }
