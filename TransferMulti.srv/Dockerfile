@@ -4,10 +4,10 @@ EXPOSE 80
 EXPOSE 443
 COPY . .
 RUN dotnet restore TransferMulti.srv.csproj
-RUN dotnet TransferMulti.srv.csproj package --vulnerable --include-transitive --format=json > list.json
+RUN dotnet list TransferMulti.srv.csproj package --vulnerable --include-transitive --format=json > list.json
 
-RUN dotnet list ./Capybara/Capybara.csproj package --outdated --include-transitive --format json    
-RUN dotnet list ./Capybara/Capybara.csproj package --deprecated --include-transitive --format json    
+RUN dotnet list TransferMulti.srv.csproj package --outdated --include-transitive --format json    
+RUN dotnet list TransferMulti.srv.csproj package --deprecated --include-transitive --format json    
 RUN dotnet publish -o /app/published-app
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview-alpine as runtime
