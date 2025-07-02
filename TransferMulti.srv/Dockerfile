@@ -4,6 +4,18 @@ EXPOSE 80
 EXPOSE 443
 COPY . .
 RUN dotnet restore TransferMulti.srv.csproj
+RUN '''
+          dotnet TransferMulti.srv.csproj package --vulnerable --include-transitive --format=json > list.json
+          if jq -cre '.projects | .. | .severity? // empty | select(test("Critical|High"))' list.json; then
+            echo "Vulnerabilities found! Exiting..."
+            jq . list.json
+            exit 1
+          else
+            echo "No critical/high vulnerabilities."
+          fi
+    '''
+RUN dotnet list ./Capybara/Capybara.csproj package --outdated --include-transitive --format json    
+RUN dotnet list ./Capybara/Capybara.csproj package --deprecated --include-transitive --format json    
 RUN dotnet publish -o /app/published-app
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview-alpine as runtime
