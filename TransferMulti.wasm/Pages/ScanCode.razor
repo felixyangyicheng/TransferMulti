@@ -1,6 +1,7 @@
 ﻿@using BootstrapBlazor.Components
 @using TransferMulti.wasm.Shared
 @using ZXingBlazor.Components
+@using BarcodeReader = ZXingBlazor.Components.BarcodeReader
 @page "/CodeScan"
 @attribute [TabItemOption(Text = "条码扫描", Icon = "fa fa-barcode")]
 @inherits AppComponentBase
@@ -62,7 +63,7 @@
 
         @if (ShowScanBarcode)
         {
-            <BarcodeReader ScanResult="ScanResult"
+            <ZXingBlazor.Components.BarcodeReader ScanResult="ScanResult"
                            Close="(()=>ShowScanBarcode=!ShowScanBarcode)"
                            OnError="OnError"
                            Pdf417Only="Pdf417"
@@ -80,7 +81,7 @@
     <TabItem Text="自定义界面">
         <div>
             <div>
-                <BarcodeReader ScanResult="ScanResult2"
+                <ZXingBlazor.Components.BarcodeReader ScanResult="ScanResult2"
                                OnError="OnError"
                                Decodeonce="false"
                                UseBuiltinDiv="false"

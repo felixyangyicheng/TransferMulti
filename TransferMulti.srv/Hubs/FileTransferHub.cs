@@ -100,7 +100,17 @@ public class FileTransferHub : Hub
         await Clients.Client(connection.Sender.Id).SendAsync("ReceiveAnswer", answer);
         return "ok";
     }
-
+    [HubMethodName("SwitchConnectionType")]
+    public async Task<string> SwitchConnectionTypeAsync(int conversationId)
+    {
+        if (!Connections.TryGetValue(conversationId, out var connection))
+            return "对话不存在";
+        if (connection.Receiver == null)
+            return "接收方未加入";
+        // 可选：在这里标记连接为中继模式（如果需要额外逻辑）
+        await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveSwitchConnectionType");
+        return "ok";
+    }
     [HubMethodName("SendFileInfo")]
     public async Task SendFileInfoAsync(int conversationId, string fileInfo)
     {

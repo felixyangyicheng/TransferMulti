@@ -1,6 +1,7 @@
 ﻿using TransferMulti.wasm.Shared;
 using System.Diagnostics.CodeAnalysis;
 using ZXingBlazor.Components;
+using BarcodeReader = ZXingBlazor.Components.BarcodeReader;
 
 namespace TransferMulti.wasm.Pages
 {

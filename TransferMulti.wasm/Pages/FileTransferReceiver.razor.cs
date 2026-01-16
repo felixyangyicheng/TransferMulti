@@ -59,7 +59,7 @@ namespace TransferMulti.wasm.Pages
             await _hub.StartAsync();
             await JSRuntime.InvokeVoidAsync("initialization", _objRef, Configuration["StunServer"]);
 
-            var result = await _hub.InvokeAsync<string>("JoinRoom", RoomId);
+            var result = await _hub.InvokeAsync<string>("JoinConversation", RoomId);
             if (result != "ok")
             {
                 await Dialog.ShowMessageBox("Avertissement", result, yesText: "Confirmer");
@@ -72,7 +72,7 @@ namespace TransferMulti.wasm.Pages
         public async Task SendIceCandidateToServer(string candidate)
         {
             System.Console.WriteLine("Prêt à envoyer les informations du candidat....");
-            var result = await _hub.InvokeAsync<string>("SendReceiverIceCandidate", candidate);
+            var result = await _hub.InvokeAsync<string>("SendReceiverIceCandidate", RoomId, candidate);  // 添加 RoomId
             System.Console.WriteLine($"Réponse du serveur:{result}");
         }
 
@@ -80,7 +80,7 @@ namespace TransferMulti.wasm.Pages
         public async Task SendAnswerToServer(string answer)
         {
             System.Console.WriteLine("Prêt à envoyer l'instruction de réponse du canal réseau....");
-            var result = await _hub.InvokeAsync<string>("SendAnswer", answer);
+            var result = await _hub.InvokeAsync<string>("SendAnswer", RoomId, answer);  // 添加 RoomId
             System.Console.WriteLine($"Réponse du serveur:{result}");
             await InvokeAsync(StateHasChanged);
         }

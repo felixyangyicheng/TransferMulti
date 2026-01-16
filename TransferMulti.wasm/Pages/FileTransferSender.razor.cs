@@ -56,15 +56,15 @@ namespace TransferMulti.wasm.Pages
 				.Build();
 
 
-			_hub.On("ReceiverJoin", async () =>
-			{
-				System.Console.WriteLine("Entrée du destinataire");
-				_isReceiverJoined = true;
-				await InvokeAsync(StateHasChanged);
-				await JSRuntime.InvokeVoidAsync("createSenderConnection");
-			});
+            _hub.On<int>("ReceiverJoined", async (conversationId) =>  // 添加 <int> 和参数
+            {
+                System.Console.WriteLine("Entrée du destinataire");
+                _isReceiverJoined = true;
+                await InvokeAsync(StateHasChanged);
+                await JSRuntime.InvokeVoidAsync("createSenderConnection");
+            });
 
-			_hub.On<string>("ReceiveReceiverIceCandidate", async (candidate) =>
+            _hub.On<string>("ReceiveReceiverIceCandidate", async (candidate) =>
 			{
 				System.Console.WriteLine("Réception des informations sur le candidat de la partie destinataire");
 				await InvokeAsync(StateHasChanged);
@@ -81,7 +81,7 @@ namespace TransferMulti.wasm.Pages
 
 			await JSRuntime.InvokeVoidAsync("initialization", _objRef, Configuration["StunServer"]);
 
-			_roomId = await _hub.InvokeAsync<int>("CreateRoom");
+			_roomId = await _hub.InvokeAsync<int>("CreateConversation");
 			_qrValue = $"{NavigationManager.BaseUri}file-transfer/receiver/{_roomId}";
 
 			System.Console.WriteLine("En attente de l'arrivée du destinataire....");
@@ -126,32 +126,31 @@ namespace TransferMulti.wasm.Pages
 				StateHasChanged();
 			}
 
-			file.FileContext = new List<byte>(buffer);
-			file.FileSize = buffer.Length;
+			file.FileContext = new List<byte>(finalBuffer);
+			file.FileSize = finalBuffer.Length;
 			var hashService = HashServiceFactory.Create(HashTypeEnum.SHA1);
-			file.SHA1 = await hashService.ComputeHashAsync(buffer, false);
+			file.SHA1 = await hashService.ComputeHashAsync(finalBuffer, false);
 			_files.Add(file);
 			StateHasChanged();
 
 			await LoadingCompletedAsync();
 		}
-		[JSInvokable]
-		public async Task SendIceCandidateToServer(string candidate)
-		{
-			System.Console.WriteLine("Prêt à envoyer les informations du candidat....");
-			var result = await _hub.InvokeAsync<string>("SendSenderIceCandidate", candidate);
-			System.Console.WriteLine($"réponse du serveur:{result}");
-		}
+        [JSInvokable]
+        public async Task SendIceCandidateToServer(string candidate)
+        {
+            System.Console.WriteLine("Prêt à envoyer les informations du candidat....");
+            var result = await _hub.InvokeAsync<string>("SendSenderIceCandidate", _roomId, candidate);  // 添加 _roomId
+            System.Console.WriteLine($"réponse du serveur:{result}");
+        }
+        [JSInvokable]
+        public async Task SendOfferToServer(string offer)
+        {
+            System.Console.WriteLine("Prêt à envoyer l'instruction de demande de canal réseau....");
+            var result = await _hub.InvokeAsync<string>("SendOffer", _roomId, offer);  // 添加 _roomId
+            System.Console.WriteLine($"réponse du serveur:{result}");
+        }
 
-		[JSInvokable]
-		public async Task SendOfferToServer(string offer)
-		{
-			System.Console.WriteLine("Prêt à envoyer l'instruction de demande de canal réseau....");
-			var result = await _hub.InvokeAsync<string>("SendOffer", offer);
-			System.Console.WriteLine($"réponse du serveur:{result}");
-		}
-
-		[JSInvokable]
+        [JSInvokable]
 		public async Task SenderConnected()
 		{
 			//发送端准备就绪
@@ -159,15 +158,15 @@ namespace TransferMulti.wasm.Pages
 			await InvokeAsync(StateHasChanged);
 		}
 
-		public async Task EnableServiceRelay()
-		{
-			_connectionType = ConnectionTypeEnum.ServiceRelay;
-			var result = await _hub.InvokeAsync<string>("SwitchConnectionType");
-			System.Console.WriteLine($"réponse du serveur:{result}");
-			await InvokeAsync(StateHasChanged);
-		}
+        public async Task EnableServiceRelay()
+        {
+            _connectionType = ConnectionTypeEnum.ServiceRelay;
+            var result = await _hub.InvokeAsync<string>("SwitchConnectionType", _roomId);  // 添加 _roomId
+            System.Console.WriteLine($"réponse du serveur:{result}");
+            await InvokeAsync(StateHasChanged);
+        }
 
-		private async void UploadFiles(IReadOnlyList<IBrowserFile> browserFiles)
+        private async void UploadFiles(IReadOnlyList<IBrowserFile> browserFiles)
 		{
 
 			IList<IBrowserFile> files = new List<IBrowserFile>();
@@ -262,8 +261,8 @@ namespace TransferMulti.wasm.Pages
 					}
 					else if (_connectionType == ConnectionTypeEnum.ServiceRelay)
 					{
-						await _hub.InvokeAsync("SendFileInfo", JsonSerializer.Serialize(fileMetadata));
-						await SendFileWithSignalRAsync();
+                        await _hub.InvokeAsync("SendFileInfo", _roomId, JsonSerializer.Serialize(fileMetadata));  // 添加 _roomId
+                        await SendFileWithSignalRAsync();
 					}
 					await InvokeAsync(StateHasChanged);
 					await Task.Delay(1);
@@ -285,16 +284,16 @@ namespace TransferMulti.wasm.Pages
 				byte[] chunk = new byte[chunkToSend];
 				file.FileContext.CopyTo(offset, chunk, 0, chunkToSend);
 
-				await _hub.InvokeAsync("SendFile", chunk);
+                await _hub.InvokeAsync("SendFile", _roomId, chunk);  // 添加 _roomId
 
-				totalBytesSent += chunkToSend;
+                totalBytesSent += chunkToSend;
 				file.TransferProgress = (double)totalBytesSent / file.FileContext.Count * 100; ;
 
 				await InvokeAsync(StateHasChanged);
 				await Task.Delay(10);
 			}
-			await _hub.InvokeAsync("SendFileSent");
-			file.State = FileTransferStateEnum.Sent;
+            await _hub.InvokeAsync("SendFileSent", _roomId);  // 添加 _roomId
+            file.State = FileTransferStateEnum.Sent;
 			_fileQueueSlim.Release();
 		}
 
