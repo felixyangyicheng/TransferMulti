@@ -11,8 +11,8 @@ namespace TransferMulti.wasm.Pages
 
         private HubConnection _hub = null!;
         private DotNetObjectReference<FileTransferReceiver> _objRef = null!;
-
-        private readonly List<FileTransferInfo> _files = new List<FileTransferInfo>();
+        // 修改为线程安全集合
+        private readonly ConcurrentBag<FileTransferInfo> _files = new ConcurrentBag<FileTransferInfo>();
 
         protected override async Task OnParametersSetAsync()
         {
@@ -93,8 +93,9 @@ namespace TransferMulti.wasm.Pages
             await InvokeAsync(StateHasChanged);
         }
 
+        // 修改 JSInvokable 以支持 fileName（如果从 JS 传递）
         [JSInvokable]
-        public async Task FileReceivingWithWebRTC(byte[] buffer)
+        public async Task FileReceivingWithWebRTC(byte[] buffer, string fileName)
         {
             await OnFileReceivingAsync(buffer);
         }
@@ -108,43 +109,39 @@ namespace TransferMulti.wasm.Pages
         private async Task OnReceiveFileInfo(string fileInfo)
         {
             var file = fileInfo.ToObject<FileTransferInfo>();
-            if (file == null)
-            {
-                return;
-            }
-            file.FileContext = new List<byte>();
+            if (file == null) return;
+            file.FileContext = new List<byte>();  // List<byte> 非线程安全，但每个文件独立
             file.State = FileTransferStateEnum.Sending;
             _files.Add(file);
             await InvokeAsync(StateHasChanged);
         }
 
         [JSInvokable]
-        public async Task FileReceivedWithWebRTC()
+        public async Task FileReceivedWithWebRTC(string fileName)
         {
-            await OnFileReceived();
+            await OnFileReceived(fileName);
         }
 
         private async Task OnFileReceivingAsync(byte[] buffer)
         {
-            var file = _files.First(x => x.State == FileTransferStateEnum.Sending);
-            file.FileContext.AddRange(buffer);
-            file.TransferProgress = (double)file.FileContext.Count / file.FileSize * 100;
+            // 如果无 fileName，用 FirstOrDefault；但并行时加条件如唯一 ID
+            var file = _files.FirstOrDefault(x => x.State == FileTransferStateEnum.Sending);
+            if (file == null) return;
+            lock (file.FileContext)  // 已加锁，好
+            {
+                file.FileContext.AddRange(buffer);
+                file.TransferProgress = (double)file.FileContext.Count / file.FileSize * 100;
+            }
             await InvokeAsync(StateHasChanged);
         }
 
-        private async Task OnFileReceived()
+        private async Task OnFileReceived(string fileName = null)
         {
-            var file = _files.First(x => x.State == FileTransferStateEnum.Sending);
+            var file = _files.FirstOrDefault(x => x.State == FileTransferStateEnum.Sending && (fileName == null || x.FileName == fileName));
+            if (file == null) return;
             var sha1 = await HashServiceFactory.Create(HashTypeEnum.SHA1).ComputeHashAsync(file.FileContext.ToArray(), false);
-            if (file.SHA1 != sha1)
-            {
-                file.Message = "Échec de la vérification du fichier";
-                file.Succeed = false;
-            }
-            else
-            {
-                file.Succeed = true;
-            }
+            file.Succeed = file.SHA1 == sha1;
+            file.Message = file.Succeed ? null : "Échec de la vérification du fichier";
             file.State = FileTransferStateEnum.Sent;
             await InvokeAsync(StateHasChanged);
         }

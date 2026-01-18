@@ -115,7 +115,7 @@ public class FileTransferHub : Hub
     public async Task SendFileInfoAsync(int conversationId, string fileInfo)
     {
         if (Connections.TryGetValue(conversationId, out var connection))
-            await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveFileInfo", fileInfo);
+            await Clients.Client(connection.Receiver?.Id).SendAsync("ReceiveFileInfo", fileInfo);
     }
 
     [HubMethodName("SendFile")]

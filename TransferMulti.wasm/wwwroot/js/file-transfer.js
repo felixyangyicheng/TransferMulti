@@ -19,11 +19,11 @@ async function createSenderConnection() {
     localDataChannel = localConnection.createDataChannel("dataChannel", dataChannelOptions);
     localDataChannel.onopen = dataChannelStateChange;
     localDataChannel.onclose = dataChannelStateChange;
+    localDataChannel.onerror = (error) => console.error("DataChannel error:", error);
 
     // 监听 ICE candidate 事件
     localConnection.onicecandidate = event => {
         if (event.candidate) {
-            // 发送本地 ICE candidate 到信令服务器
             dotNetHelper.invokeMethodAsync('SendIceCandidateToServer', JSON.stringify(event.candidate));
         }
     }
@@ -44,7 +44,6 @@ function dataChannelStateChange() {
 
 // 客户端 A 使用接收到的 SDP answer 设置远程描述
 async function receiveAnswer(answer) {
-
     const answerObj = JSON.parse(answer);
     await localConnection.setRemoteDescription(
         {
@@ -55,24 +54,19 @@ async function receiveAnswer(answer) {
 
 // 在客户端 B 中执行
 async function createReceiverConnection(offer) {
-
     const config = { iceServers: [{ urls: stunServer }] };
     remoteConnection = new RTCPeerConnection(config);
 
-    // 监听 ICE candidate 事件
     remoteConnection.onicecandidate = event => {
         if (event.candidate) {
-            // 发送本地 ICE candidate 到信令服务器
             dotNetHelper.invokeMethodAsync('SendIceCandidateToServer', JSON.stringify(event.candidate));
         }
     }
     remoteConnection.ondatachannel = event => {
-
-        // 设置数据通道的事件处理程序
         event.channel.onopen = handleDataChannelOpen;
         event.channel.onmessage = receiveFileData;
     };
-    // 设置远程 SDP
+
     const offerObj = JSON.parse(offer);
     await remoteConnection.setRemoteDescription(
         {
@@ -80,17 +74,13 @@ async function createReceiverConnection(offer) {
             sdp: offerObj.sdp
         });
 
-    // 创建 SDP Answer
     const answer = await remoteConnection.createAnswer();
     await remoteConnection.setLocalDescription(answer);
 
-    // 发送 SDP Answer 到信令服务器
     dotNetHelper.invokeMethodAsync('SendAnswerToServer', JSON.stringify(answer));
 }
 
-// 在客户端 A 和 B 中都执行
 function receiveIceCandidate(candidate) {
-    // 在双方连接中添加远程 ICE candidate
     const candidateObj = JSON.parse(candidate);
     const iceCandidate = new RTCIceCandidate(
         {
@@ -111,26 +101,29 @@ function handleDataChannelOpen() {
 
 let readyToSendKey = "ReadyToSend";
 let fileSent = "FileSent";
-function receiveFileData(event) {
 
+// sendFileInfo: 添加 fileName 到元数据（但 Serialize 已包含 FileName，无需额外）
+
+// receiveFileData: 解析时，如果是数据，传 fileName 到 .NET
+function receiveFileData(event) {
     const receivedData = event.data;
     if (typeof receivedData === 'string') {
-
-        if (receivedData.indexOf(readyToSendKey) == 0) {
+        if (receivedData.startsWith(readyToSendKey)) {
             let fileInfo = receivedData.substring(readyToSendKey.length);
-            //收到元数据
             dotNetHelper.invokeMethodAsync('FileInfoReceived', fileInfo);
-        } else if (receivedData == fileSent) {
-            dotNetHelper.invokeMethodAsync('FileReceivedWithWebRTC');
+        } else if (receivedData === fileSent) {
+            dotNetHelper.invokeMethodAsync('FileReceivedWithWebRTC');  // 如果需要，添加 fileName
         }
-
     } else {
+        // 假设从元数据已知 fileName，或用其他方式；当前保持简单，如果混淆再加
         dotNetHelper.invokeMethodAsync('FileReceivingWithWebRTC', new Uint8Array(receivedData));
     }
 }
 
+// sendFileDataChunks: 同上，无需改
+
+// 发送文件信息时也不加 fileName 前缀（保持简单稳定）
 function sendFileInfo(fileInfo) {
-    //发送文件元数据
     localDataChannel.send(readyToSendKey + fileInfo);
 }
 
@@ -138,13 +131,12 @@ function sendFile(fileArray) {
     sendFileDataChunks(fileArray);
 }
 
-const CHUNK_SIZE = 16384; // 每个数据块的大小
-const SEND_INTERVAL = 20; // 每个数据块发送间隔（毫秒）
+const CHUNK_SIZE = 16384;
+const SEND_INTERVAL = 20;
+
 function sendFileDataChunks(byteArray) {
-    // 发送文件数据块
     const chunk = byteArray.slice(0, CHUNK_SIZE);
     localDataChannel.send(chunk);
-    // 删除已发送的数据块
     byteArray = byteArray.slice(CHUNK_SIZE);
     dotNetHelper.invokeMethodAsync('FileSending', byteArray.length);
 
@@ -153,7 +145,6 @@ function sendFileDataChunks(byteArray) {
             sendFileDataChunks(byteArray);
         }, SEND_INTERVAL);
     } else {
-        // 文件数据已发送完成
         localDataChannel.send(fileSent);
         dotNetHelper.invokeMethodAsync('FileSent');
     }

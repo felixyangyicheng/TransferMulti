@@ -18,8 +18,8 @@ namespace TransferMulti.wasm.Pages
 
 		private readonly List<FileTransferInfo> _files = new List<FileTransferInfo>();
 
-		private readonly SemaphoreSlim _fileQueueSlim = new(1, 1);
-		private readonly ConcurrentQueue<FileTransferInfo> _fileQueue = new ConcurrentQueue<FileTransferInfo>();
+		private readonly SemaphoreSlim _fileQueueSlim = new SemaphoreSlim(3, 3);
+        private readonly ConcurrentQueue<FileTransferInfo> _fileQueue = new ConcurrentQueue<FileTransferInfo>();
 
 		protected ElementReference UploadElement { get; set; }
 		protected InputFile? inputFile { get; set; }
@@ -84,10 +84,101 @@ namespace TransferMulti.wasm.Pages
 			_roomId = await _hub.InvokeAsync<int>("CreateConversation");
 			_qrValue = $"{NavigationManager.BaseUri}file-transfer/receiver/{_roomId}";
 
-			System.Console.WriteLine("En attente de l'arrivée du destinataire....");
-			await Task.Factory.StartNew(StartSendFileQueueAsync, TaskCreationOptions.LongRunning);
-		}
-		protected async Task OnChange(InputFileChangeEventArgs e)
+	
+			//await Task.Factory.StartNew(StartSendFileQueueAsync, TaskCreationOptions.LongRunning);
+            System.Console.WriteLine("En attente de l'arrivée du destinataire....");
+
+            // 启动3个并行 worker 任务处理队列
+            var workers = new List<Task>();
+            for (int i = 0; i < 3; i++)
+            {
+                workers.Add(Task.Factory.StartNew(ProcessFileQueueAsync, TaskCreationOptions.LongRunning));
+            }
+            // 可选：await Task.WhenAll(workers); 但由于无限循环，不需要
+        }
+        // 新 worker 方法：每个任务独立处理队列
+        private async Task ProcessFileQueueAsync()
+        {
+            while (!_isClosePage)
+            {
+                if (_fileQueue.TryDequeue(out var file))
+                {
+                    await _fileQueueSlim.WaitAsync();
+                    try  // 添加 try-catch 防止异常停止 worker
+                    {
+                        var currentFile = _files.First(x => x.FileName == file.FileName);
+                        currentFile.State = FileTransferStateEnum.Sending;
+
+                        // 移除 FileMetadata 转换，直接用 file
+                        if (_connectionType == ConnectionTypeEnum.WebRTC)
+                        {
+                            await JSRuntime.InvokeVoidAsync("sendFileInfo", JsonSerializer.Serialize(file));  // 改为 file
+                            await JSRuntime.InvokeVoidAsync("sendFile", file.FileContext.ToArray());
+                        }
+                        else if (_connectionType == ConnectionTypeEnum.ServiceRelay)
+                        {
+                            await _hub.InvokeAsync("SendFileInfo", _roomId, JsonSerializer.Serialize(file));  // 改为 file
+                            await SendFileWithSignalRAsync(currentFile);  // 传入 file 以避免 First 查询
+                        }
+                        await InvokeAsync(StateHasChanged);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Console.WriteLine($"Erreur lors de l'envoi du fichier: {ex.Message}");
+                        // 可选：回滚状态或通知用户
+                    }
+                    finally
+                    {
+                        _fileQueueSlim.Release();
+                    }
+                    await Task.Delay(1);
+                }
+                await Task.Delay(10);
+            }
+        }
+        // 新方法：发送单个文件（支持 WebRTC 和 SignalR）
+        // 在 SendFileAsync 中加入判断
+        private async Task SendFileAsync(FileTransferInfo file)
+        {
+            if (_connectionType == ConnectionTypeEnum.WebRTC)
+            {
+                // WebRTC 单通道暂不适合高并发，强制等待上一个文件完成
+                while (_files.Any(f => f.State == FileTransferStateEnum.Sending))
+                {
+                    await Task.Delay(100);
+                }
+
+                var fileJson = JsonSerializer.Serialize(file);
+                await JSRuntime.InvokeVoidAsync("sendFileInfo", fileJson);  // 只传一个参数
+                await JSRuntime.InvokeVoidAsync("sendFile", file.FileContext.ToArray());
+            }
+            else if (_connectionType == ConnectionTypeEnum.ServiceRelay)
+            {
+                await _hub.InvokeAsync("SendFileInfo", _roomId, JsonSerializer.Serialize(file));
+                await SendFileWithSignalRAsync(file);
+            }
+            await InvokeAsync(StateHasChanged);
+        }
+
+        private async Task SendFileWithSignalRAsync(FileTransferInfo file)
+        {
+            int totalBytesSent = 0;
+            for (int offset = 0; offset < file.FileContext.Count; offset += _chunkSize)
+            {
+                int remainingBytes = file.FileContext.Count - offset;
+                int chunkToSend = Math.Min(_chunkSize, remainingBytes);
+                byte[] chunk = new byte[chunkToSend];
+                file.FileContext.CopyTo(offset, chunk, 0, chunkToSend);
+                await _hub.InvokeAsync("SendFile", _roomId, chunk);
+                totalBytesSent += chunkToSend;
+                file.TransferProgress = (double)totalBytesSent / file.FileContext.Count * 100;
+                await InvokeAsync(StateHasChanged);
+                await Task.Delay(10);
+            }
+            await _hub.InvokeAsync("SendFileSent", _roomId);
+            file.State = FileTransferStateEnum.Sent;
+        }
+        protected async Task OnChange(InputFileChangeEventArgs e)
 		{
 
 			var fileList = e.GetMultipleFiles(e.FileCount);
@@ -181,7 +272,7 @@ namespace TransferMulti.wasm.Pages
 					};
 					var parameters = new DialogParameters();
 					parameters.Add("ContentText", "Impossible d'ajouter le fichier de façon répétée");
-					Dialog.Show<DialogOk>("Avertissement", parameters, options);
+					await Dialog.ShowAsync<DialogOk>("Avertissement", parameters, options);
 					return;
 				}
 				files.Add(browserFile);
@@ -204,7 +295,7 @@ namespace TransferMulti.wasm.Pages
 				};
 				var parameters = new DialogParameters();
 				parameters.Add("ContentText", $"La taille du fichier {f.Name} dépasse la limite du système");
-				Dialog.Show<DialogOk>("Avertissement", parameters, options);
+                await Dialog.ShowAsync<DialogOk>("Avertissement", parameters, options);
 				return;
 			}
 			var file = new FileTransferInfo();
@@ -297,23 +388,30 @@ namespace TransferMulti.wasm.Pages
 			_fileQueueSlim.Release();
 		}
 
-		[JSInvokable]
-		public async Task FileSending(int length)
-		{
-			var file = _files.First(x => x.State == FileTransferStateEnum.Sending);
-			file.TransferProgress = (double)(file.FileSize - length) / file.FileSize * 100;
-			await InvokeAsync(StateHasChanged);
-		}
+        // FileSending 和 FileSent 也改回无 fileName 参数（因为现在是串行）
+        [JSInvokable]
+        public async Task FileSending(int length)
+        {
+            var file = _files.FirstOrDefault(x => x.State == FileTransferStateEnum.Sending);
+            if (file != null)
+            {
+                file.TransferProgress = (double)(file.FileSize - length) / file.FileSize * 100;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
 
-		[JSInvokable]
-		public async Task FileSent()
-		{
-			_files.First(x => x.State == FileTransferStateEnum.Sending).State = FileTransferStateEnum.Sent;
-			_fileQueueSlim.Release();
-			await InvokeAsync(StateHasChanged);
-		}
+        [JSInvokable]
+        public async Task FileSent()
+        {
+            var file = _files.FirstOrDefault(x => x.State == FileTransferStateEnum.Sending);
+            if (file != null)
+            {
+                file.State = FileTransferStateEnum.Sent;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
 
-		private async Task LoadingAsync(string message)
+        private async Task LoadingAsync(string message)
 		{
 			_isLoading = true;
 			_loadingMessage = message;
