@@ -102,21 +102,24 @@ function handleDataChannelOpen() {
 let readyToSendKey = "ReadyToSend";
 let fileSent = "FileSent";
 
-// sendFileInfo: 添加 fileName 到元数据（但 Serialize 已包含 FileName，无需额外）
+// 修改 receiveFileData 以提取 fileName
+let currentFileName = null;  // 临时存储当前文件名称（假设串行；如果并行，用 Map 存储）
 
-// receiveFileData: 解析时，如果是数据，传 fileName 到 .NET
 function receiveFileData(event) {
     const receivedData = event.data;
     if (typeof receivedData === 'string') {
         if (receivedData.startsWith(readyToSendKey)) {
             let fileInfo = receivedData.substring(readyToSendKey.length);
+            // 解析 JSON 获取 FileName（假设 fileInfo 是 JSON 字符串）
+            let fileInfoObj = JSON.parse(fileInfo);
+            currentFileName = fileInfoObj.FileName;  // 提取 FileName 属性
             dotNetHelper.invokeMethodAsync('FileInfoReceived', fileInfo);
         } else if (receivedData === fileSent) {
-            dotNetHelper.invokeMethodAsync('FileReceivedWithWebRTC');  // 如果需要，添加 fileName
+            dotNetHelper.invokeMethodAsync('FileReceivedWithWebRTC', currentFileName);  // 传递 fileName
+            currentFileName = null;  // 重置
         }
     } else {
-        // 假设从元数据已知 fileName，或用其他方式；当前保持简单，如果混淆再加
-        dotNetHelper.invokeMethodAsync('FileReceivingWithWebRTC', new Uint8Array(receivedData));
+        dotNetHelper.invokeMethodAsync('FileReceivingWithWebRTC', new Uint8Array(receivedData), currentFileName);  // 传递 2 个参数
     }
 }
 
