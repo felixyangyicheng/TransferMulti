@@ -19,7 +19,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\TransferMulti.wasm\TransferMulti.wasm.csproj" />
+    <!-- 单元测试不需要 WASM Hot Reload；禁用它可以避免 Debug 构建生成重复资源。 -->
+    <ProjectReference Include="..\TransferMulti.wasm\TransferMulti.wasm.csproj" AdditionalProperties="WasmEnableHotReload=false" />
   </ItemGroup>
 
 </Project>

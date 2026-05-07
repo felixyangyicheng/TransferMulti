@@ -2,6 +2,7 @@ namespace TransferMulti.wasm.Pages
 {
     public partial class FileTransferSender : IDisposable
     {
+        // 同时最多发送 3 个文件；这个值会创建 3 个并行 worker。
         private const int MaxParallelTransfers = 3;
         private const int ChunkSize = 16 * 1024;
         private const long MaxBrowserFileSize = 512_000L * 1000;
@@ -66,6 +67,7 @@ namespace TransferMulti.wasm.Pages
 
         private void StartQueueWorkers()
         {
+            // 页面初始化后立即启动固定数量的 worker，后续文件只需要加入队列即可。
             _transferQueue.Start(
                 TransferFileAsync,
                 () => InvokeAsync(StateHasChanged),
@@ -74,6 +76,7 @@ namespace TransferMulti.wasm.Pages
 
         private async Task TransferFileAsync(FileTransferInfo file, CancellationToken cancellationToken)
         {
+            // 队列负责并发控制；这里根据当前连接类型选择真正的传输通道。
             switch (_connectionType)
             {
                 case ConnectionTypeEnum.WebRTC:
@@ -92,8 +95,7 @@ namespace TransferMulti.wasm.Pages
 
         private async Task SendFileWithWebRtcAsync(FileTransferInfo file)
         {
-            // Only metadata is sent in the control message; file bytes travel on
-            // a dedicated DataChannel selected by file.Id.
+            // 控制消息只发送元数据；文件内容会通过 file.Id 对应的独立 DataChannel 发送。
             await JSRuntime.InvokeVoidAsync(
                 "sendFile",
                 file.Id,
@@ -222,8 +224,7 @@ namespace TransferMulti.wasm.Pages
         [JSInvokable]
         public async Task WebRtcConnectionEstablished()
         {
-            // Once the peer connection is available, the queue still limits
-            // active file transfers to MaxParallelTransfers.
+            // WebRTC 连接建立后，队列仍然负责限制同时活跃的文件数量。
             if (_connectionType == ConnectionTypeEnum.ServiceRelay)
             {
                 return;
@@ -255,12 +256,14 @@ namespace TransferMulti.wasm.Pages
 
         private async Task SendAllFilesAsync()
         {
+            // 批量发送时只是把所有可发送文件入队，worker 会自动按 3 个一组并行处理。
             _transferQueue.QueueFiles(_files.Values.OrderBy(x => x.FileName));
             await InvokeAsync(StateHasChanged);
         }
 
         private void QueueFile(FileTransferInfo file)
         {
+            // 单个文件发送也复用同一个队列，保证不会绕过并发上限。
             _transferQueue.QueueFile(file);
         }
 

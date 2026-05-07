@@ -45,8 +45,7 @@ internal sealed class ParallelFileTransferQueue
             return;
         }
 
-        // One worker handles one file at a time. The worker count is therefore
-        // the single limit for how many files can be active together.
+        // 每个 worker 一次只处理一个文件，所以 worker 的数量就是同时传输文件的上限。
         for (var index = 0; index < MaxParallelTransfers; index++)
         {
             _workers.Add(Task.Run(
@@ -59,6 +58,7 @@ internal sealed class ParallelFileTransferQueue
     {
         ArgumentNullException.ThrowIfNull(file);
 
+        // 只有初始状态或失败状态的文件可以进入队列，避免同一个文件被重复发送。
         if (file.State is not (FileTransferStateEnum.Init or FileTransferStateEnum.Fail))
         {
             return false;
@@ -97,6 +97,7 @@ internal sealed class ParallelFileTransferQueue
         {
             try
             {
+                // 没有文件时 worker 会等待信号；有新文件入队时 QueueFile 会释放信号。
                 await _queueSignal.WaitAsync(cancellationToken);
             }
             catch (OperationCanceledException)
@@ -104,6 +105,7 @@ internal sealed class ParallelFileTransferQueue
                 break;
             }
 
+            // 如果文件已被删除、状态已变化或队列竞争失败，就跳过并等待下一个文件。
             if (!_fileQueue.TryDequeue(out var fileId)
                 || !_files.TryGetValue(fileId, out var file)
                 || file.State != FileTransferStateEnum.Queue)
@@ -126,6 +128,7 @@ internal sealed class ParallelFileTransferQueue
             }
             catch (Exception ex)
             {
+                // 单个文件失败不会停止整个队列，worker 会继续处理后面的文件。
                 file.State = FileTransferStateEnum.Fail;
                 file.Message = $"Erreur d'envoi : {ex.Message}";
                 await notifyStateChangedAsync();

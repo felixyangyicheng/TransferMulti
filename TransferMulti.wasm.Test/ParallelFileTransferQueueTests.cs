@@ -102,6 +102,7 @@ public sealed class ParallelFileTransferQueueTests
     [Fact]
     public async Task Start_ProcessesNoMoreThanConfiguredTransfersAtOnce()
     {
+        // 这个测试故意阻塞传输任务，用来观察同时活跃的任务数量是否超过 3。
         var files = Enumerable.Range(1, 6)
             .Select(index => CreateFile($"file-{index}", FileTransferStateEnum.Init))
             .ToArray();
@@ -152,6 +153,7 @@ public sealed class ParallelFileTransferQueueTests
     [Fact]
     public async Task Start_WhenOneTransferFails_MarksItFailedAndContinuesWithNextFile()
     {
+        // 第一个文件失败后，worker 不应该退出；它必须继续发送队列中的下一个文件。
         var firstFile = CreateFile("file-1", FileTransferStateEnum.Init);
         var secondFile = CreateFile("file-2", FileTransferStateEnum.Init);
         var processedFiles = new ConcurrentQueue<string>();
