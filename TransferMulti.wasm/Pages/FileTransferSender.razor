@@ -91,7 +91,7 @@
                                 <MudElement HtmlTag="a"
                                             Class="ma-0 cursor-pointer"
                                             Style="color:var(--mud-palette-primary);font-weight:bold;opacity: 1;"
-                                            onclick="@EnableServiceRelay"
+                                            @onclick="EnableServiceRelay"
                                             rel="noopener noreferrer">
                                     relai serveur
                                 </MudElement>
@@ -125,7 +125,7 @@
                             </tr>
                         </thead>
                         <tbody style="overflow-y:scroll">
-                            @foreach (var i in _files)
+                            @foreach (var i in _files.Values)
                             {
                                 <tr>    
                                         <td>@(i.FileName)</td>
@@ -152,7 +152,7 @@
                     </MudItem>
 
 
-                    foreach (var file in _files)
+                    foreach (var file in _files.Values)
                     {
                         <MudItem xs="12" sm="12" md="12">
                             <div class="d-flex align-center justify-space-between">
@@ -171,6 +171,10 @@
                                         break;
                                     case FileTransferStateEnum.Sent:
                                         <MudLink Disabled="true">Terminé</MudLink>
+                                        break;
+                                    case FileTransferStateEnum.Fail:
+                                        <MudLink Underline="@Underline.None"
+                                                 OnClick="@(() =>SendFileAsync(file.FileName))">Réessayer</MudLink>
                                         break;
                                 }
                             </div>

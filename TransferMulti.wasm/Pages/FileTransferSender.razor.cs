@@ -1,62 +1,41 @@
-﻿
-
 namespace TransferMulti.wasm.Pages
 {
-	public partial class FileTransferSender
-	{
-		private bool _isClosePage = false;
-		private int _roomId;
-		private bool _isLoading = false;
-		private string _loadingMessage = "";
-		private string _qrValue = "";
+    public partial class FileTransferSender : IDisposable
+    {
+        private const int MaxParallelTransfers = 3;
+        private const int ChunkSize = 16 * 1024;
+        private const long MaxBrowserFileSize = 512_000L * 1000;
 
-		private bool _isReceiverJoined = false;
-		private ConnectionTypeEnum _connectionType = ConnectionTypeEnum.None;
+        private bool _isLoading;
+        private int _roomId;
+        private string _loadingMessage = "";
+        private string _qrValue = "";
+        private bool _isReceiverJoined;
+        private ConnectionTypeEnum _connectionType = ConnectionTypeEnum.None;
 
-		private HubConnection _hub = null!;
-		private DotNetObjectReference<FileTransferSender> _objRef = null!;
+        private HubConnection _hub = null!;
+        private DotNetObjectReference<FileTransferSender> _objRef = null!;
+        private readonly ConcurrentDictionary<string, FileTransferInfo> _files = new();
+        private readonly ConcurrentQueue<string> _fileQueue = new();
+        private readonly SemaphoreSlim _queueSignal = new(0);
+        private readonly CancellationTokenSource _transferCts = new();
+        private readonly List<Task> _queueWorkers = new();
 
-		private readonly List<FileTransferInfo> _files = new List<FileTransferInfo>();
+        protected ElementReference UploadElement { get; set; }
+        protected InputFile? inputFile { get; set; }
 
-		private readonly SemaphoreSlim _fileQueueSlim = new SemaphoreSlim(3, 3);
-        private readonly ConcurrentQueue<FileTransferInfo> _fileQueue = new ConcurrentQueue<FileTransferInfo>();
+        protected override async Task OnInitializedAsync()
+        {
+            await base.OnInitializedAsync();
+            System.Console.WriteLine("Préparation à l'initialisation de la salle....");
 
-		protected ElementReference UploadElement { get; set; }
-		protected InputFile? inputFile { get; set; }
+            _objRef = DotNetObjectReference.Create(this);
+            _hub = new HubConnectionBuilder()
+                .WithUrl($"{Configuration["TransferMulti.srv"]}/file-transfer-hub")
+                .WithAutomaticReconnect()
+                .Build();
 
-
-		protected class UploadModel
-		{
-			public int Progress { get; set; } = 0;
-			public bool Uploaded { get; set; } = false;
-			public bool Deleted { get; set; }
-
-			public string Name { get; set; } = "";
-
-			public DateTimeOffset LastModified { get; set; }
-
-			public long Size { get; set; }
-
-			public string ContentType { get; set; } = "";
-			public byte[] Content { get; set; } = [];
-
-		}
-
-
-
-
-		protected override async Task OnParametersSetAsync()
-		{
-			await base.OnInitializedAsync();
-			System.Console.WriteLine($"Préparation à l'initialisation de la salle....");
-			_objRef = DotNetObjectReference.Create(this);
-
-			_hub = new HubConnectionBuilder()
-				.WithUrl($"{Configuration["TransferMulti.srv"]}/file-transfer-hub").WithAutomaticReconnect()
-				.Build();
-
-
-            _hub.On<int>("ReceiverJoined", async (conversationId) =>  // 添加 <int> 和参数
+            _hub.On<int>("ReceiverJoined", async _ =>
             {
                 System.Console.WriteLine("Entrée du destinataire");
                 _isReceiverJoined = true;
@@ -64,371 +43,352 @@ namespace TransferMulti.wasm.Pages
                 await JSRuntime.InvokeVoidAsync("createSenderConnection");
             });
 
-            _hub.On<string>("ReceiveReceiverIceCandidate", async (candidate) =>
-			{
-				System.Console.WriteLine("Réception des informations sur le candidat de la partie destinataire");
-				await InvokeAsync(StateHasChanged);
-				await JSRuntime.InvokeVoidAsync("receiveIceCandidate", candidate);
-			});
+            _hub.On<string>("ReceiveReceiverIceCandidate", async candidate =>
+            {
+                System.Console.WriteLine("Réception des informations ICE du destinataire");
+                await JSRuntime.InvokeVoidAsync("receiveIceCandidate", candidate);
+            });
 
-			_hub.On<string>("ReceiveAnswer", async (answer) =>
-			{
-				System.Console.WriteLine("Réception de l'instruction de réponse du canal réseau");
-				await JSRuntime.InvokeVoidAsync("receiveAnswer", answer);
-				await InvokeAsync(StateHasChanged);
-			});
-			await _hub.StartAsync();
+            _hub.On<string>("ReceiveAnswer", async answer =>
+            {
+                System.Console.WriteLine("Réception de la réponse WebRTC");
+                await JSRuntime.InvokeVoidAsync("receiveAnswer", answer);
+            });
 
-			await JSRuntime.InvokeVoidAsync("initialization", _objRef, Configuration["StunServer"]);
+            await _hub.StartAsync();
+            await JSRuntime.InvokeVoidAsync("initialization", _objRef, Configuration["StunServer"]);
 
-			_roomId = await _hub.InvokeAsync<int>("CreateConversation");
-			_qrValue = $"{NavigationManager.BaseUri}file-transfer/receiver/{_roomId}";
+            _roomId = await _hub.InvokeAsync<int>("CreateConversation");
+            _qrValue = $"{NavigationManager.BaseUri}file-transfer/receiver/{_roomId}";
 
-	
-			//await Task.Factory.StartNew(StartSendFileQueueAsync, TaskCreationOptions.LongRunning);
+            StartQueueWorkers();
             System.Console.WriteLine("En attente de l'arrivée du destinataire....");
-
-            // 启动3个并行 worker 任务处理队列
-            var workers = new List<Task>();
-            for (int i = 0; i < 3; i++)
-            {
-                workers.Add(Task.Factory.StartNew(ProcessFileQueueAsync, TaskCreationOptions.LongRunning));
-            }
-            // 可选：await Task.WhenAll(workers); 但由于无限循环，不需要
         }
-        // 新 worker 方法：每个任务独立处理队列
-        private async Task ProcessFileQueueAsync()
-        {
-            while (!_isClosePage)
-            {
-                if (_fileQueue.TryDequeue(out var file))
-                {
-                    await _fileQueueSlim.WaitAsync();
-                    try  // 添加 try-catch 防止异常停止 worker
-                    {
-                        var currentFile = _files.First(x => x.FileName == file.FileName);
-                        currentFile.State = FileTransferStateEnum.Sending;
 
-                        // 移除 FileMetadata 转换，直接用 file
-                        if (_connectionType == ConnectionTypeEnum.WebRTC)
-                        {
-                            await JSRuntime.InvokeVoidAsync("sendFileInfo", JsonSerializer.Serialize(file));  // 改为 file
-                            await JSRuntime.InvokeVoidAsync("sendFile", file.FileContext.ToArray());
-                        }
-                        else if (_connectionType == ConnectionTypeEnum.ServiceRelay)
-                        {
-                            await _hub.InvokeAsync("SendFileInfo", _roomId, JsonSerializer.Serialize(file));  // 改为 file
-                            await SendFileWithSignalRAsync(currentFile);  // 传入 file 以避免 First 查询
-                        }
-                        await InvokeAsync(StateHasChanged);
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Console.WriteLine($"Erreur lors de l'envoi du fichier: {ex.Message}");
-                        // 可选：回滚状态或通知用户
-                    }
-                    finally
-                    {
-                        _fileQueueSlim.Release();
-                    }
-                    await Task.Delay(1);
-                }
-                await Task.Delay(10);
+        private void StartQueueWorkers()
+        {
+            // La limite de parallélisme vit ici : 3 workers => 3 fichiers actifs au maximum,
+            // quel que soit le transport utilisé derrière (WebRTC ou SignalR).
+            for (var index = 0; index < MaxParallelTransfers; index++)
+            {
+                _queueWorkers.Add(Task.Run(() => ProcessFileQueueAsync(_transferCts.Token)));
             }
         }
-        // 新方法：发送单个文件（支持 WebRTC 和 SignalR）
-        // 在 SendFileAsync 中加入判断
-        private async Task SendFileAsync(FileTransferInfo file)
+
+        private async Task ProcessFileQueueAsync(CancellationToken cancellationToken)
         {
-            if (_connectionType == ConnectionTypeEnum.WebRTC)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                // WebRTC 单通道暂不适合高并发，强制等待上一个文件完成
-                while (_files.Any(f => f.State == FileTransferStateEnum.Sending))
+                try
                 {
-                    await Task.Delay(100);
+                    await _queueSignal.WaitAsync(cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
                 }
 
-                var fileJson = JsonSerializer.Serialize(file);
-                await JSRuntime.InvokeVoidAsync("sendFileInfo", fileJson);  // 只传一个参数
-                await JSRuntime.InvokeVoidAsync("sendFile", file.FileContext.ToArray());
+                if (!_fileQueue.TryDequeue(out var fileId) || !_files.TryGetValue(fileId, out var file))
+                {
+                    continue;
+                }
+
+                if (file.State != FileTransferStateEnum.Queue)
+                {
+                    continue;
+                }
+
+                file.State = FileTransferStateEnum.Sending;
+                file.TransferProgress = 0;
+                file.Message = "";
+                await InvokeAsync(StateHasChanged);
+
+                try
+                {
+                    // Chaque worker ne traite qu'un fileId à la fois.
+                    // On évite ainsi les collisions d'état quand 3 fichiers partent en parallèle.
+                    await TransferFileAsync(file, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    file.State = FileTransferStateEnum.Fail;
+                    file.Message = $"Erreur d'envoi : {ex.Message}";
+                    await InvokeAsync(StateHasChanged);
+                }
             }
-            else if (_connectionType == ConnectionTypeEnum.ServiceRelay)
+        }
+
+        private async Task TransferFileAsync(FileTransferInfo file, CancellationToken cancellationToken)
+        {
+            switch (_connectionType)
             {
-                await _hub.InvokeAsync("SendFileInfo", _roomId, JsonSerializer.Serialize(file));
-                await SendFileWithSignalRAsync(file);
+                case ConnectionTypeEnum.WebRTC:
+                    await SendFileWithWebRtcAsync(file);
+                    return;
+                case ConnectionTypeEnum.ServiceRelay:
+                    await SendFileWithSignalRAsync(file, cancellationToken);
+                    return;
+                default:
+                    file.State = FileTransferStateEnum.Fail;
+                    file.Message = "Aucun canal de transfert n'est disponible.";
+                    await InvokeAsync(StateHasChanged);
+                    return;
             }
+        }
+
+        private async Task SendFileWithWebRtcAsync(FileTransferInfo file)
+        {
+            // On n'envoie que les métadonnées dans le message de contrôle.
+            // Le contenu binaire part ensuite sur un DataChannel dédié au fichier.
+            await JSRuntime.InvokeVoidAsync(
+                "sendFile",
+                file.Id,
+                CreateFileMetadataPayload(file),
+                file.FileContext.ToArray());
+        }
+
+        private async Task SendFileWithSignalRAsync(FileTransferInfo file, CancellationToken cancellationToken)
+        {
+            await _hub.InvokeAsync("SendFileInfo", _roomId, file.Id, CreateFileMetadataPayload(file));
+
+            var totalBytesSent = 0;
+            for (var offset = 0; offset < file.FileContext.Count; offset += ChunkSize)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var remainingBytes = file.FileContext.Count - offset;
+                var chunkToSend = Math.Min(ChunkSize, remainingBytes);
+                var chunk = new byte[chunkToSend];
+                file.FileContext.CopyTo(offset, chunk, 0, chunkToSend);
+
+                await _hub.InvokeAsync("SendFile", _roomId, file.Id, chunk);
+
+                totalBytesSent += chunkToSend;
+                file.TransferProgress = file.FileSize == 0
+                    ? 100
+                    : (double)totalBytesSent / file.FileSize * 100;
+
+                await InvokeAsync(StateHasChanged);
+                await Task.Delay(1, cancellationToken);
+            }
+
+            await _hub.InvokeAsync("SendFileSent", _roomId, file.Id);
+            file.State = FileTransferStateEnum.Sent;
+            file.TransferProgress = 100;
             await InvokeAsync(StateHasChanged);
         }
 
-        private async Task SendFileWithSignalRAsync(FileTransferInfo file)
-        {
-            int totalBytesSent = 0;
-            for (int offset = 0; offset < file.FileContext.Count; offset += _chunkSize)
-            {
-                int remainingBytes = file.FileContext.Count - offset;
-                int chunkToSend = Math.Min(_chunkSize, remainingBytes);
-                byte[] chunk = new byte[chunkToSend];
-                file.FileContext.CopyTo(offset, chunk, 0, chunkToSend);
-                await _hub.InvokeAsync("SendFile", _roomId, chunk);
-                totalBytesSent += chunkToSend;
-                file.TransferProgress = (double)totalBytesSent / file.FileContext.Count * 100;
-                await InvokeAsync(StateHasChanged);
-                await Task.Delay(10);
-            }
-            await _hub.InvokeAsync("SendFileSent", _roomId);
-            file.State = FileTransferStateEnum.Sent;
-        }
         protected async Task OnChange(InputFileChangeEventArgs e)
-		{
+        {
+            await LoadingAsync("Traitement des fichiers en cours...");
 
-			var fileList = e.GetMultipleFiles(e.FileCount);
+            try
+            {
+                var selectedFiles = e.GetMultipleFiles(e.FileCount);
+                var namesInBatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var readTasks = new List<Task<FileTransferInfo?>>();
 
-			var tasks = fileList.Select(async f => await OnSubmit(f));
-			await Task.WhenAll(tasks);
-		}
+                foreach (var browserFile in selectedFiles)
+                {
+                    if (_files.Values.Any(x => string.Equals(x.FileName, browserFile.Name, StringComparison.OrdinalIgnoreCase))
+                        || !namesInBatch.Add(browserFile.Name))
+                    {
+                        Snackbar.Add($"Le fichier {browserFile.Name} est déjà présent dans la liste.", Severity.Warning);
+                        continue;
+                    }
 
-		protected async Task OnSubmit(IBrowserFile efile)
-		{
-			await LoadingAsync("Traitement du fichier en cours...");
+                    readTasks.Add(ReadBrowserFileAsync(browserFile));
+                }
 
-			if (efile == null) return;
+                var files = await Task.WhenAll(readTasks);
+                foreach (var file in files.Where(static x => x is not null))
+                {
+                    _files.TryAdd(file!.Id, file);
+                }
 
-			var file = new FileTransferInfo();
-			file.FileName = efile.Name;
-			var ms = new MemoryStream();
-			// await efile.OpenReadStream(512000 * 1000).CopyToAsync(ms);
-			// var buffer = ms.ToArray();
-			var buffer = new byte[1024 * 512];
+                await InvokeAsync(StateHasChanged);
+            }
+            finally
+            {
+                await LoadingCompletedAsync();
+            }
+        }
 
+        private async Task<FileTransferInfo?> ReadBrowserFileAsync(IBrowserFile browserFile)
+        {
+            if (browserFile is null)
+            {
+                return null;
+            }
 
+            var fileSize = checked((int)browserFile.Size);
+            var file = new FileTransferInfo
+            {
+                Id = Guid.NewGuid().ToString(),
+                FileName = browserFile.Name,
+                FileSize = fileSize,
+                UploadProgress = 0
+            };
 
-			file.UploadProgress = 0;
+            var readBuffer = new byte[1024 * 512];
+            var fileBuffer = new byte[fileSize];
 
-			int count;
-			int totalCount = 0;
-			using var stream = efile.OpenReadStream(512000 * 1000);
-			var finalBuffer = new byte[stream.Length];
+            var totalRead = 0;
+            await using var stream = browserFile.OpenReadStream(MaxBrowserFileSize);
+            int bytesRead;
+            while ((bytesRead = await stream.ReadAsync(readBuffer, 0, readBuffer.Length)) > 0)
+            {
+                Buffer.BlockCopy(readBuffer, 0, fileBuffer, totalRead, bytesRead);
+                totalRead += bytesRead;
+                file.UploadProgress = fileSize == 0 ? 100 : totalRead * 100d / fileSize;
+                await InvokeAsync(StateHasChanged);
+            }
 
-			while ((count = await stream.ReadAsync(buffer, 0, buffer.Length)) != 0)
-			{
-				Buffer.BlockCopy(buffer, 0, finalBuffer, totalCount, count);
-				totalCount += count;
-				file.UploadProgress = (int)(totalCount * 100.0 / stream.Length);
-				StateHasChanged();
-			}
+            file.FileContext = new List<byte>(fileBuffer);
+            file.SHA1 = await HashServiceFactory.Create(HashTypeEnum.SHA1).ComputeHashAsync(fileBuffer, false);
+            return file;
+        }
 
-			file.FileContext = new List<byte>(finalBuffer);
-			file.FileSize = finalBuffer.Length;
-			var hashService = HashServiceFactory.Create(HashTypeEnum.SHA1);
-			file.SHA1 = await hashService.ComputeHashAsync(finalBuffer, false);
-			_files.Add(file);
-			StateHasChanged();
-
-			await LoadingCompletedAsync();
-		}
         [JSInvokable]
         public async Task SendIceCandidateToServer(string candidate)
         {
-            System.Console.WriteLine("Prêt à envoyer les informations du candidat....");
-            var result = await _hub.InvokeAsync<string>("SendSenderIceCandidate", _roomId, candidate);  // 添加 _roomId
-            System.Console.WriteLine($"réponse du serveur:{result}");
-        }
-        [JSInvokable]
-        public async Task SendOfferToServer(string offer)
-        {
-            System.Console.WriteLine("Prêt à envoyer l'instruction de demande de canal réseau....");
-            var result = await _hub.InvokeAsync<string>("SendOffer", _roomId, offer);  // 添加 _roomId
-            System.Console.WriteLine($"réponse du serveur:{result}");
+            System.Console.WriteLine("Prêt à envoyer le candidat ICE de l'émetteur");
+            var result = await _hub.InvokeAsync<string>("SendSenderIceCandidate", _roomId, candidate);
+            System.Console.WriteLine($"Réponse du serveur : {result}");
         }
 
         [JSInvokable]
-		public async Task SenderConnected()
-		{
-			//发送端准备就绪
-			_connectionType = ConnectionTypeEnum.WebRTC;
-			await InvokeAsync(StateHasChanged);
-		}
+        public async Task SendOfferToServer(string offer)
+        {
+            System.Console.WriteLine("Prêt à envoyer l'offre WebRTC");
+            var result = await _hub.InvokeAsync<string>("SendOffer", _roomId, offer);
+            System.Console.WriteLine($"Réponse du serveur : {result}");
+        }
+
+        [JSInvokable]
+        public async Task WebRtcConnectionEstablished()
+        {
+            // Le peer connection devient le transport par défaut.
+            // Les fichiers resteront ensuite limités à 3 flux actifs en parallèle par la file côté .NET.
+            if (_connectionType == ConnectionTypeEnum.ServiceRelay)
+            {
+                return;
+            }
+
+            _connectionType = ConnectionTypeEnum.WebRTC;
+            await InvokeAsync(StateHasChanged);
+        }
 
         public async Task EnableServiceRelay()
         {
             _connectionType = ConnectionTypeEnum.ServiceRelay;
-            var result = await _hub.InvokeAsync<string>("SwitchConnectionType", _roomId);  // 添加 _roomId
-            System.Console.WriteLine($"réponse du serveur:{result}");
+            var result = await _hub.InvokeAsync<string>("SwitchConnectionType", _roomId);
+            System.Console.WriteLine($"Réponse du serveur : {result}");
             await InvokeAsync(StateHasChanged);
         }
 
-        private async void UploadFiles(IReadOnlyList<IBrowserFile> browserFiles)
-		{
-
-			IList<IBrowserFile> files = new List<IBrowserFile>();
-
-			foreach (var browserFile in browserFiles)
-			{
-				if (_files.Any(x => x.FileName == browserFile.Name))
-				{
-					var options = new DialogOptions()
-					{
-						NoHeader = true
-					};
-					var parameters = new DialogParameters();
-					parameters.Add("ContentText", "Impossible d'ajouter le fichier de façon répétée");
-					await Dialog.ShowAsync<DialogOk>("Avertissement", parameters, options);
-					return;
-				}
-				files.Add(browserFile);
-			}
-
-			await LoadingAsync("Traitement du fichier en cours...");
-			var uploadTasks = browserFiles.Select(async file => await OnUploadReadStreamAsync(file));
-			await Task.WhenAll(uploadTasks);
-			await LoadingCompletedAsync();
-		}
-
-		protected async Task OnUploadReadStreamAsync(IBrowserFile f)
-		{
-			long maxFileSize = 100000000;
-			if (f.Size >= maxFileSize)
-			{
-				var options = new DialogOptions()
-				{
-					NoHeader = true
-				};
-				var parameters = new DialogParameters();
-				parameters.Add("ContentText", $"La taille du fichier {f.Name} dépasse la limite du système");
-                await Dialog.ShowAsync<DialogOk>("Avertissement", parameters, options);
-				return;
-			}
-			var file = new FileTransferInfo();
-			file.FileName = f.Name;
-			var ms = new MemoryStream();
-			await f.OpenReadStream(maxFileSize).CopyToAsync(ms);
-			var buffer = ms.ToArray();
-			file.FileContext = new List<byte>(buffer);
-			file.FileSize = buffer.Length;
-			var hashService = HashServiceFactory.Create(HashTypeEnum.SHA1);
-			file.SHA1 = await hashService.ComputeHashAsync(buffer, false);
-			_files.Add(file);
-			Snackbar.Add($"{file.FileName} ajouté", Severity.Info);
-		}
-		private async Task SendFileAsync(string fileName)
-		{
-			var file = _files.First(x => x.FileName == fileName);
-			if (file.State != FileTransferStateEnum.Init)
-			{
-				return;
-			}
-			file.State = FileTransferStateEnum.Queue;
-			_fileQueue.Enqueue(file);
-			await InvokeAsync(StateHasChanged);
-		}
-
-		private async Task SendAllFilesAsync()
-		{
-			foreach (var file in _files)
-			{
-				if (file.State != FileTransferStateEnum.Init)
-				{
-					continue;
-				}
-				file.State = FileTransferStateEnum.Queue;
-				_fileQueue.Enqueue(file);
-			}
-			await InvokeAsync(StateHasChanged);
-		}
-
-		private async Task StartSendFileQueueAsync()
-		{
-			while (!_isClosePage)
-			{
-				while (_fileQueue.TryDequeue(out var file))
-				{
-					await _fileQueueSlim.WaitAsync();
-					_files.First(x => x.FileName == file.FileName).State = FileTransferStateEnum.Sending;
-					FileMetadata fileMetadata = file as FileMetadata;
-					if (_connectionType == ConnectionTypeEnum.WebRTC)
-					{
-						await JSRuntime.InvokeVoidAsync("sendFileInfo", JsonSerializer.Serialize(fileMetadata));
-						await JSRuntime.InvokeVoidAsync("sendFile", file.FileContext.ToArray());
-					}
-					else if (_connectionType == ConnectionTypeEnum.ServiceRelay)
-					{
-                        await _hub.InvokeAsync("SendFileInfo", _roomId, JsonSerializer.Serialize(fileMetadata));  // 添加 _roomId
-                        await SendFileWithSignalRAsync();
-					}
-					await InvokeAsync(StateHasChanged);
-					await Task.Delay(1);
-				}
-				await Task.Delay(10);
-			}
-		}
-
-		private int _chunkSize = 16384;
-		private async Task SendFileWithSignalRAsync()
-		{
-			var file = _files.First(x => x.State == FileTransferStateEnum.Sending);
-			int totalBytesSent = 0;
-
-			for (int offset = 0; offset < file.FileContext.Count; offset += _chunkSize)
-			{
-				int remainingBytes = file.FileContext.Count - offset;
-				int chunkToSend = Math.Min(_chunkSize, remainingBytes);
-				byte[] chunk = new byte[chunkToSend];
-				file.FileContext.CopyTo(offset, chunk, 0, chunkToSend);
-
-                await _hub.InvokeAsync("SendFile", _roomId, chunk);  // 添加 _roomId
-
-                totalBytesSent += chunkToSend;
-				file.TransferProgress = (double)totalBytesSent / file.FileContext.Count * 100; ;
-
-				await InvokeAsync(StateHasChanged);
-				await Task.Delay(10);
-			}
-            await _hub.InvokeAsync("SendFileSent", _roomId);  // 添加 _roomId
-            file.State = FileTransferStateEnum.Sent;
-			_fileQueueSlim.Release();
-		}
-
-        // FileSending 和 FileSent 也改回无 fileName 参数（因为现在是串行）
-        [JSInvokable]
-        public async Task FileSending(int length)
+        private async Task SendFileAsync(string fileName)
         {
-            var file = _files.FirstOrDefault(x => x.State == FileTransferStateEnum.Sending);
-            if (file != null)
+            var file = _files.Values.FirstOrDefault(x => x.FileName == fileName);
+            if (file is null)
             {
-                file.TransferProgress = (double)(file.FileSize - length) / file.FileSize * 100;
-                await InvokeAsync(StateHasChanged);
+                return;
             }
+
+            QueueFile(file);
+            await InvokeAsync(StateHasChanged);
+        }
+
+        private async Task SendAllFilesAsync()
+        {
+            foreach (var file in _files.Values.OrderBy(x => x.FileName))
+            {
+                QueueFile(file);
+            }
+
+            await InvokeAsync(StateHasChanged);
+        }
+
+        private void QueueFile(FileTransferInfo file)
+        {
+            if (file.State is not (FileTransferStateEnum.Init or FileTransferStateEnum.Fail))
+            {
+                return;
+            }
+
+            file.State = FileTransferStateEnum.Queue;
+            file.TransferProgress = 0;
+            file.Message = "";
+            _fileQueue.Enqueue(file.Id);
+            _queueSignal.Release();
         }
 
         [JSInvokable]
-        public async Task FileSent()
+        public async Task FileSending(string fileId, int remainingBytes)
         {
-            var file = _files.FirstOrDefault(x => x.State == FileTransferStateEnum.Sending);
-            if (file != null)
+            if (!_files.TryGetValue(fileId, out var file) || file.State != FileTransferStateEnum.Sending)
             {
-                file.State = FileTransferStateEnum.Sent;
-                await InvokeAsync(StateHasChanged);
+                return;
             }
+
+            file.TransferProgress = file.FileSize == 0
+                ? 100
+                : (double)(file.FileSize - remainingBytes) / file.FileSize * 100;
+
+            await InvokeAsync(StateHasChanged);
+        }
+
+        [JSInvokable]
+        public async Task FileSent(string fileId)
+        {
+            if (!_files.TryGetValue(fileId, out var file) || file.State != FileTransferStateEnum.Sending)
+            {
+                return;
+            }
+
+            file.State = FileTransferStateEnum.Sent;
+            file.TransferProgress = 100;
+            await InvokeAsync(StateHasChanged);
+        }
+
+        private static string CreateFileMetadataPayload(FileTransferInfo file)
+        {
+            return JsonSerializer.Serialize(new FileMetadata
+            {
+                Id = file.Id,
+                FileName = file.FileName,
+                FileSize = file.FileSize,
+                SHA1 = file.SHA1
+            });
         }
 
         private async Task LoadingAsync(string message)
-		{
-			_isLoading = true;
-			_loadingMessage = message;
-			await InvokeAsync(StateHasChanged);
-		}
-		private async Task LoadingCompletedAsync()
-		{
-			_isLoading = false;
-			_loadingMessage = "";
-			await InvokeAsync(StateHasChanged);
-		}
+        {
+            _isLoading = true;
+            _loadingMessage = message;
+            await InvokeAsync(StateHasChanged);
+        }
 
-		public void Dispose()
-		{
-			_isClosePage = true;
-			_objRef?.Dispose();
-		}
+        private async Task LoadingCompletedAsync()
+        {
+            _isLoading = false;
+            _loadingMessage = "";
+            await InvokeAsync(StateHasChanged);
+        }
 
-	}
+        public void Dispose()
+        {
+            _transferCts.Cancel();
+            _objRef?.Dispose();
+
+            if (_hub is not null)
+            {
+                _ = _hub.DisposeAsync();
+            }
+        }
+    }
 }

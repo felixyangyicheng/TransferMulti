@@ -10,8 +10,7 @@ internal class ConnectionDetail
         RoomId = roomId;
         Sender = sender;
         Receiver = receiver;
-        //expiration 30 mins
-        ExpirationTime = DateTime.Now.AddMinutes(30);
+        ExpirationTime = expiration ?? DateTime.Now.AddMinutes(30);
     }
 }
 

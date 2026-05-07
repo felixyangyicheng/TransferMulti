@@ -2,6 +2,7 @@
 namespace TransferMulti.wasm.Models;
 internal class FileTransferInfo : FileMetadata
 {
+
     public List<byte> FileContext { get; set; } = new List<byte>();
     public FileTransferStateEnum State { get; set; }
     public double TransferProgress { get; set; }
@@ -12,6 +13,7 @@ internal class FileTransferInfo : FileMetadata
 
 internal class FileMetadata
 {
+    public string Id { get; set; } = Guid.NewGuid().ToString();  // 唯一ID
     public string FileName { get; set; } = null!;
     public string SHA1 { get; set; } = null!;
     public int FileSize { get; set; }

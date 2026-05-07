@@ -1,4 +1,4 @@
-﻿using JiuLing.CommonLibs.ExtensionMethods;
+using JiuLing.CommonLibs.ExtensionMethods;
 using Microsoft.AspNetCore.SignalR;
 using System.Collections.Concurrent;
 using TransferMulti.srv.Models.FileTransfer;
@@ -8,37 +8,26 @@ namespace OnTransfert.srv.Hubs;
 public class FileTransferHub : Hub
 {
     private static readonly ConcurrentDictionary<int, ConnectionDetail> Connections = new();
-    private static readonly SemaphoreSlim ConcurrencyLock = new(3, 3); // 允许3个并行传输
     private static readonly TimeSpan RoomExpiration = TimeSpan.FromMinutes(5);
 
     [HubMethodName("CreateConversation")]
-    public async Task<int> CreateConversationAsync()
+    public Task<int> CreateConversationAsync()
     {
-        await ConcurrencyLock.WaitAsync();
-        try
+        CleanExpiredRooms();
+
+        while (true)
         {
-            CleanExpiredRooms();
-
-            int conversationId;
-            do
-            {
-                conversationId = Random.Shared.Next(1000, 9999);
-            } while (Connections.ContainsKey(conversationId));
-
+            var conversationId = Random.Shared.Next(1000, 9999);
             var sender = new SenderInfo(Context.ConnectionId);
             var expiration = DateTime.Now.Add(RoomExpiration);
-            Connections[conversationId] = new ConnectionDetail(
-                conversationId,
-                sender,
-                null,
-                expiration
-            );
+            var connection = new ConnectionDetail(conversationId, sender, null, expiration);
 
-            return conversationId;
-        }
-        finally
-        {
-            ConcurrencyLock.Release();
+            // La simultanéité des transferts ne doit pas être bloquée par la création de salle.
+            // TryAdd suffit ici pour garantir un identifiant unique sans sérialiser tout le hub.
+            if (Connections.TryAdd(conversationId, connection))
+            {
+                return Task.FromResult(conversationId);
+            }
         }
     }
 
@@ -84,7 +73,7 @@ public class FileTransferHub : Hub
     [HubMethodName("SendOffer")]
     public async Task<string> SendOfferAsync(int conversationId, string offer)
     {
-        if (!Connections.TryGetValue(conversationId, out var connection))
+        if (!Connections.TryGetValue(conversationId, out var connection) || connection.Receiver == null)
             return "对话不存在";
 
         await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveOffer", offer);
@@ -100,36 +89,47 @@ public class FileTransferHub : Hub
         await Clients.Client(connection.Sender.Id).SendAsync("ReceiveAnswer", answer);
         return "ok";
     }
+
     [HubMethodName("SwitchConnectionType")]
     public async Task<string> SwitchConnectionTypeAsync(int conversationId)
     {
         if (!Connections.TryGetValue(conversationId, out var connection))
             return "对话不存在";
+
         if (connection.Receiver == null)
             return "接收方未加入";
-        // 可选：在这里标记连接为中继模式（如果需要额外逻辑）
+
         await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveSwitchConnectionType");
         return "ok";
     }
+
     [HubMethodName("SendFileInfo")]
-    public async Task SendFileInfoAsync(int conversationId, string fileInfo)
+    public async Task SendFileInfoAsync(int conversationId, string fileId, string fileInfo)
     {
-        if (Connections.TryGetValue(conversationId, out var connection))
-            await Clients.Client(connection.Receiver?.Id).SendAsync("ReceiveFileInfo", fileInfo);
+        if (Connections.TryGetValue(conversationId, out var connection) && connection.Receiver != null)
+        {
+            await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveFileInfo", fileId, fileInfo);
+        }
     }
 
     [HubMethodName("SendFile")]
-    public async Task SendFileAsync(int conversationId, byte[] buffer)
+    public async Task SendFileAsync(int conversationId, string fileId, byte[] buffer)
     {
-        if (Connections.TryGetValue(conversationId, out var connection))
-            await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveFile", buffer);
+        if (Connections.TryGetValue(conversationId, out var connection) && connection.Receiver != null)
+        {
+            // Le hub relaie les chunks avec leur fileId.
+            // Les messages de plusieurs fichiers peuvent donc s'entrelacer sans être confondus côté client.
+            await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveFile", fileId, buffer);
+        }
     }
 
     [HubMethodName("SendFileSent")]
-    public async Task SendFileSentAsync(int conversationId)
+    public async Task SendFileSentAsync(int conversationId, string fileId)
     {
-        if (Connections.TryGetValue(conversationId, out var connection))
-            await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveFileSent");
+        if (Connections.TryGetValue(conversationId, out var connection) && connection.Receiver != null)
+        {
+            await Clients.Client(connection.Receiver.Id).SendAsync("ReceiveFileSent", fileId);
+        }
     }
 
     private void CleanExpiredRooms()
@@ -140,6 +140,8 @@ public class FileTransferHub : Hub
             .ToList();
 
         foreach (var id in expiredIds)
+        {
             Connections.TryRemove(id, out _);
+        }
     }
 }

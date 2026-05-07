@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TransferMulti.srv", "..\Tra
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TransferMulti.wasm", "..\TransferMulti\TransferMulti.wasm\TransferMulti.wasm.csproj", "{A3CAAD6A-8C60-4C51-A3D5-E64D1E339176}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TransferMulti.srv.Test", "..\TransferMulti\TransferMulti.srv.Test\TransferMulti.srv.Test.csproj", "{7E7D3B93-A7F6-4D76-B86A-8458701A8C3B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{A3CAAD6A-8C60-4C51-A3D5-E64D1E339176}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A3CAAD6A-8C60-4C51-A3D5-E64D1E339176}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A3CAAD6A-8C60-4C51-A3D5-E64D1E339176}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7E7D3B93-A7F6-4D76-B86A-8458701A8C3B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7E7D3B93-A7F6-4D76-B86A-8458701A8C3B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7E7D3B93-A7F6-4D76-B86A-8458701A8C3B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7E7D3B93-A7F6-4D76-B86A-8458701A8C3B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
