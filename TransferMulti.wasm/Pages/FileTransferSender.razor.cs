@@ -16,10 +16,8 @@ namespace TransferMulti.wasm.Pages
         private HubConnection _hub = null!;
         private DotNetObjectReference<FileTransferSender> _objRef = null!;
         private readonly ConcurrentDictionary<string, FileTransferInfo> _files = new();
-        private readonly ConcurrentQueue<string> _fileQueue = new();
-        private readonly SemaphoreSlim _queueSignal = new(0);
         private readonly CancellationTokenSource _transferCts = new();
-        private readonly List<Task> _queueWorkers = new();
+        private ParallelFileTransferQueue _transferQueue = null!;
 
         protected ElementReference UploadElement { get; set; }
         protected InputFile? inputFile { get; set; }
@@ -27,7 +25,7 @@ namespace TransferMulti.wasm.Pages
         protected override async Task OnInitializedAsync()
         {
             await base.OnInitializedAsync();
-            System.Console.WriteLine("Préparation à l'initialisation de la salle....");
+            System.Console.WriteLine("Preparation a l'initialisation de la salle....");
 
             _objRef = DotNetObjectReference.Create(this);
             _hub = new HubConnectionBuilder()
@@ -37,7 +35,7 @@ namespace TransferMulti.wasm.Pages
 
             _hub.On<int>("ReceiverJoined", async _ =>
             {
-                System.Console.WriteLine("Entrée du destinataire");
+                System.Console.WriteLine("Entree du destinataire");
                 _isReceiverJoined = true;
                 await InvokeAsync(StateHasChanged);
                 await JSRuntime.InvokeVoidAsync("createSenderConnection");
@@ -45,13 +43,13 @@ namespace TransferMulti.wasm.Pages
 
             _hub.On<string>("ReceiveReceiverIceCandidate", async candidate =>
             {
-                System.Console.WriteLine("Réception des informations ICE du destinataire");
+                System.Console.WriteLine("Reception des informations ICE du destinataire");
                 await JSRuntime.InvokeVoidAsync("receiveIceCandidate", candidate);
             });
 
             _hub.On<string>("ReceiveAnswer", async answer =>
             {
-                System.Console.WriteLine("Réception de la réponse WebRTC");
+                System.Console.WriteLine("Reception de la reponse WebRTC");
                 await JSRuntime.InvokeVoidAsync("receiveAnswer", answer);
             });
 
@@ -61,65 +59,17 @@ namespace TransferMulti.wasm.Pages
             _roomId = await _hub.InvokeAsync<int>("CreateConversation");
             _qrValue = $"{NavigationManager.BaseUri}file-transfer/receiver/{_roomId}";
 
+            _transferQueue = new ParallelFileTransferQueue(_files, MaxParallelTransfers);
             StartQueueWorkers();
-            System.Console.WriteLine("En attente de l'arrivée du destinataire....");
+            System.Console.WriteLine("En attente de l'arrivee du destinataire....");
         }
 
         private void StartQueueWorkers()
         {
-            // La limite de parallélisme vit ici : 3 workers => 3 fichiers actifs au maximum,
-            // quel que soit le transport utilisé derrière (WebRTC ou SignalR).
-            for (var index = 0; index < MaxParallelTransfers; index++)
-            {
-                _queueWorkers.Add(Task.Run(() => ProcessFileQueueAsync(_transferCts.Token)));
-            }
-        }
-
-        private async Task ProcessFileQueueAsync(CancellationToken cancellationToken)
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                try
-                {
-                    await _queueSignal.WaitAsync(cancellationToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-
-                if (!_fileQueue.TryDequeue(out var fileId) || !_files.TryGetValue(fileId, out var file))
-                {
-                    continue;
-                }
-
-                if (file.State != FileTransferStateEnum.Queue)
-                {
-                    continue;
-                }
-
-                file.State = FileTransferStateEnum.Sending;
-                file.TransferProgress = 0;
-                file.Message = "";
-                await InvokeAsync(StateHasChanged);
-
-                try
-                {
-                    // Chaque worker ne traite qu'un fileId à la fois.
-                    // On évite ainsi les collisions d'état quand 3 fichiers partent en parallèle.
-                    await TransferFileAsync(file, cancellationToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    file.State = FileTransferStateEnum.Fail;
-                    file.Message = $"Erreur d'envoi : {ex.Message}";
-                    await InvokeAsync(StateHasChanged);
-                }
-            }
+            _transferQueue.Start(
+                TransferFileAsync,
+                () => InvokeAsync(StateHasChanged),
+                _transferCts.Token);
         }
 
         private async Task TransferFileAsync(FileTransferInfo file, CancellationToken cancellationToken)
@@ -142,8 +92,8 @@ namespace TransferMulti.wasm.Pages
 
         private async Task SendFileWithWebRtcAsync(FileTransferInfo file)
         {
-            // On n'envoie que les métadonnées dans le message de contrôle.
-            // Le contenu binaire part ensuite sur un DataChannel dédié au fichier.
+            // Only metadata is sent in the control message; file bytes travel on
+            // a dedicated DataChannel selected by file.Id.
             await JSRuntime.InvokeVoidAsync(
                 "sendFile",
                 file.Id,
@@ -197,7 +147,7 @@ namespace TransferMulti.wasm.Pages
                     if (_files.Values.Any(x => string.Equals(x.FileName, browserFile.Name, StringComparison.OrdinalIgnoreCase))
                         || !namesInBatch.Add(browserFile.Name))
                     {
-                        Snackbar.Add($"Le fichier {browserFile.Name} est déjà présent dans la liste.", Severity.Warning);
+                        Snackbar.Add($"Le fichier {browserFile.Name} est deja present dans la liste.", Severity.Warning);
                         continue;
                     }
 
@@ -256,24 +206,24 @@ namespace TransferMulti.wasm.Pages
         [JSInvokable]
         public async Task SendIceCandidateToServer(string candidate)
         {
-            System.Console.WriteLine("Prêt à envoyer le candidat ICE de l'émetteur");
+            System.Console.WriteLine("Pret a envoyer le candidat ICE de l'emetteur");
             var result = await _hub.InvokeAsync<string>("SendSenderIceCandidate", _roomId, candidate);
-            System.Console.WriteLine($"Réponse du serveur : {result}");
+            System.Console.WriteLine($"Reponse du serveur : {result}");
         }
 
         [JSInvokable]
         public async Task SendOfferToServer(string offer)
         {
-            System.Console.WriteLine("Prêt à envoyer l'offre WebRTC");
+            System.Console.WriteLine("Pret a envoyer l'offre WebRTC");
             var result = await _hub.InvokeAsync<string>("SendOffer", _roomId, offer);
-            System.Console.WriteLine($"Réponse du serveur : {result}");
+            System.Console.WriteLine($"Reponse du serveur : {result}");
         }
 
         [JSInvokable]
         public async Task WebRtcConnectionEstablished()
         {
-            // Le peer connection devient le transport par défaut.
-            // Les fichiers resteront ensuite limités à 3 flux actifs en parallèle par la file côté .NET.
+            // Once the peer connection is available, the queue still limits
+            // active file transfers to MaxParallelTransfers.
             if (_connectionType == ConnectionTypeEnum.ServiceRelay)
             {
                 return;
@@ -287,7 +237,7 @@ namespace TransferMulti.wasm.Pages
         {
             _connectionType = ConnectionTypeEnum.ServiceRelay;
             var result = await _hub.InvokeAsync<string>("SwitchConnectionType", _roomId);
-            System.Console.WriteLine($"Réponse du serveur : {result}");
+            System.Console.WriteLine($"Reponse du serveur : {result}");
             await InvokeAsync(StateHasChanged);
         }
 
@@ -305,26 +255,13 @@ namespace TransferMulti.wasm.Pages
 
         private async Task SendAllFilesAsync()
         {
-            foreach (var file in _files.Values.OrderBy(x => x.FileName))
-            {
-                QueueFile(file);
-            }
-
+            _transferQueue.QueueFiles(_files.Values.OrderBy(x => x.FileName));
             await InvokeAsync(StateHasChanged);
         }
 
         private void QueueFile(FileTransferInfo file)
         {
-            if (file.State is not (FileTransferStateEnum.Init or FileTransferStateEnum.Fail))
-            {
-                return;
-            }
-
-            file.State = FileTransferStateEnum.Queue;
-            file.TransferProgress = 0;
-            file.Message = "";
-            _fileQueue.Enqueue(file.Id);
-            _queueSignal.Release();
+            _transferQueue.QueueFile(file);
         }
 
         [JSInvokable]

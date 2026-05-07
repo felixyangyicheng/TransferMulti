@@ -16,3 +16,4 @@ global using Microsoft.AspNetCore.Components.Web;
 global using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 global using MudBlazor.Services;
 global using TransferMulti.wasm.HashCheckService;
+global using TransferMulti.wasm.Services;
