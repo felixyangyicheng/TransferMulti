@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Concurrent;
+using System.Linq;
 
 namespace TransferMulti.wasm.Services;
 
@@ -17,9 +19,9 @@ public sealed class FileCheckpointService
     }
 
     public bool TryLoadCheckpoint(string fileId, out TransferCheckpoint? checkpoint)
-            
+    {
         return _checkpoints.TryGetValue(fileId, out checkpoint) &&
-               checkpoint.Timestamp.AddHours(MaxCheckpointAgeHours) > DateTime.UtcNow;
+               checkpoint!.Timestamp.AddHours(MaxCheckpointAgeHours) > DateTime.UtcNow;
     }
 
     public void RemoveExpiredCheckpoints()
@@ -29,5 +31,5 @@ public sealed class FileCheckpointService
             _checkpoints.TryRemove(kvp.Key, out _);
     }
 
-    public int GetTotalPendingBytes() => _checkpoints.Values.Sum(c => c.Offset + c.Size);
+    public int GetTotalPendingBytes() => _checkpoints.Values.Sum(c => (int)(c.Offset + c.Size));
 }

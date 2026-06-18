@@ -1,3 +1,11 @@
+using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.JSInterop;
+using System.Collections.Concurrent;
+using System.Text.Json;
+using TransferMulti.wasm.Enums;
+using TransferMulti.wasm.Models;
+using TransferMulti.wasm.Services;
+
 namespace TransferMulti.wasm.Pages
 {
     public partial class FileTransferReceiver : IDisposable
@@ -12,6 +20,9 @@ namespace TransferMulti.wasm.Pages
         private DotNetObjectReference<FileTransferReceiver> _objRef = null!;
         private readonly ConcurrentDictionary<string, FileTransferInfo> _files = new();
 
+        [Inject]
+        private ILogger<FileTransferReceiver> Logger { get; set; } = null!;
+
         protected override async Task OnParametersSetAsync()
         {
             await base.OnParametersSetAsync();
@@ -22,7 +33,7 @@ namespace TransferMulti.wasm.Pages
             }
 
             _initialized = true;
-            System.Console.WriteLine("Préparation à l'initialisation du module....");
+            Logger.LogInformation("准备初始化接收端模块，房间号: {RoomId}", RoomId);
             _objRef = DotNetObjectReference.Create(this);
 
             _hub = new HubConnectionBuilder()
@@ -31,19 +42,20 @@ namespace TransferMulti.wasm.Pages
 
             _hub.On<string>("ReceiveSenderIceCandidate", async candidate =>
             {
-                System.Console.WriteLine("Réception des informations ICE de l'émetteur");
+                Logger.LogDebug("收到发送方 ICE 候选");
                 await JSRuntime.InvokeVoidAsync("receiveIceCandidate", candidate);
             });
 
             _hub.On<string>("ReceiveOffer", async offer =>
             {
-                System.Console.WriteLine("Réception de l'offre WebRTC");
+                Logger.LogDebug("收到 WebRTC Offer");
                 await JSRuntime.InvokeVoidAsync("createReceiverConnection", offer);
             });
 
             _hub.On("ReceiveSwitchConnectionType", async () =>
             {
                 _connectionType = ConnectionTypeEnum.ServiceRelay;
+                Logger.LogInformation("发送方已切换到服务端中继模式");
                 await InvokeAsync(StateHasChanged);
             });
 
@@ -68,6 +80,7 @@ namespace TransferMulti.wasm.Pages
             var result = await _hub.InvokeAsync<string>("JoinConversation", RoomId);
             if (result != "ok")
             {
+                Logger.LogWarning("加入房间失败: {Reason}", result);
                 await Dialog.ShowMessageBox("Avertissement", result, yesText: "Confirmer");
                 NavigationManager.NavigateTo("/file-transfer");
             }
@@ -76,17 +89,17 @@ namespace TransferMulti.wasm.Pages
         [JSInvokable]
         public async Task SendIceCandidateToServer(string candidate)
         {
-            System.Console.WriteLine("Prêt à envoyer le candidat ICE du destinataire");
+            Logger.LogDebug("发送 ICE 候选到服务器");
             var result = await _hub.InvokeAsync<string>("SendReceiverIceCandidate", RoomId, candidate);
-            System.Console.WriteLine($"Réponse du serveur : {result}");
+            Logger.LogDebug("服务器响应: {Result}", result);
         }
 
         [JSInvokable]
         public async Task SendAnswerToServer(string answer)
         {
-            System.Console.WriteLine("Prêt à envoyer la réponse WebRTC");
+            Logger.LogDebug("发送 WebRTC Answer");
             var result = await _hub.InvokeAsync<string>("SendAnswer", RoomId, answer);
-            System.Console.WriteLine($"Réponse du serveur : {result}");
+            Logger.LogDebug("服务器响应: {Result}", result);
         }
 
         [JSInvokable]
@@ -98,6 +111,7 @@ namespace TransferMulti.wasm.Pages
             }
 
             _connectionType = ConnectionTypeEnum.WebRTC;
+            Logger.LogInformation("WebRTC 连接已建立");
             await InvokeAsync(StateHasChanged);
         }
 
@@ -127,19 +141,20 @@ namespace TransferMulti.wasm.Pages
                 return;
             }
 
+            // 预先分配精确大小的 byte[]，避免 List<byte> 的扩容开销
             var file = new FileTransferInfo
             {
                 Id = metadata.Id,
                 FileName = metadata.FileName,
                 FileSize = metadata.FileSize,
                 SHA1 = metadata.SHA1,
-                FileContext = new List<byte>(),
+                FileContext = metadata.FileSize > 0 ? new byte[(int)metadata.FileSize] : [],
+                ReceivedBytes = 0,
                 State = FileTransferStateEnum.Sending
             };
 
-            // Le fileId devient la clé unique commune à SignalR et WebRTC.
-            // La progression reste donc correcte même quand 3 fichiers arrivent en parallèle.
             _files[fileId] = file;
+            Logger.LogInformation("开始接收文件: {FileName} ({FileSize} bytes)", metadata.FileName, metadata.FileSize);
             await InvokeAsync(StateHasChanged);
         }
 
@@ -150,12 +165,13 @@ namespace TransferMulti.wasm.Pages
                 return;
             }
 
-            lock (file.FileContext)
+            lock (file.LockObject)
             {
-                file.FileContext.AddRange(buffer);
+                Buffer.BlockCopy(buffer, 0, file.FileContext!, (int)file.ReceivedBytes, buffer.Length);
+                file.ReceivedBytes += buffer.Length;
                 file.TransferProgress = file.FileSize == 0
                     ? 100
-                    : (double)file.FileContext.Count / file.FileSize * 100;
+                    : (double)file.ReceivedBytes / file.FileSize * 100;
             }
 
             await InvokeAsync(StateHasChanged);
@@ -168,11 +184,22 @@ namespace TransferMulti.wasm.Pages
                 return;
             }
 
-            var sha1 = await HashServiceFactory.Create(HashTypeEnum.SHA1).ComputeHashAsync(file.FileContext.ToArray(), false);
+            Logger.LogInformation("文件接收完成，校验哈希: {FileName}", file.FileName);
+            var sha1 = await HashServiceFactory.Create(HashTypeEnum.SHA1).ComputeHashAsync(file.FileContext!, false);
             file.Succeed = file.SHA1 == sha1;
             file.Message = file.Succeed ? "" : "Échec de la vérification du fichier";
             file.State = FileTransferStateEnum.Sent;
             file.TransferProgress = 100;
+
+            if (file.Succeed)
+            {
+                Logger.LogInformation("文件校验成功: {FileName}", file.FileName);
+            }
+            else
+            {
+                Logger.LogWarning("文件校验失败: {FileName}", file.FileName);
+            }
+
             await InvokeAsync(StateHasChanged);
         }
 
@@ -181,7 +208,7 @@ namespace TransferMulti.wasm.Pages
             var file = _files.Values.FirstOrDefault(x => x.FileName == fileName);
             if (file is not null)
             {
-                await JSRuntime.InvokeVoidAsync("saveToFileWithBufferAndName", fileName, file.FileContext.ToArray());
+                await JSRuntime.InvokeVoidAsync("saveToFileWithBufferAndName", fileName, file.FileContext!);
             }
         }
 

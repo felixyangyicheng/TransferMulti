@@ -214,7 +214,7 @@ public sealed class ParallelFileTransferQueueTests
             Id = id,
             FileName = $"{id}.txt",
             FileSize = 3,
-            FileContext = new List<byte> { 1, 2, 3 },
+            FileContext = new byte[] { 1, 2, 3 },
             SHA1 = "sha1",
             State = state
         };

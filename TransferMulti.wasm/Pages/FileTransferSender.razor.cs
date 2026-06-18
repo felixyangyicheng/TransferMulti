@@ -1,11 +1,21 @@
+using Microsoft.AspNetCore.Components.Forms;
+using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.JSInterop;
+using System.Collections.Concurrent;
+using System.Text.Json;
+using TransferMulti.wasm.Enums;
+using TransferMulti.wasm.Models;
+using TransferMulti.wasm.Services;
+
 namespace TransferMulti.wasm.Pages
 {
     public partial class FileTransferSender : IDisposable
     {
         // 同时最多发送 3 个文件；这个值会创建 3 个并行 worker。
         private const int MaxParallelTransfers = 3;
-        private const int ChunkSize = 16 * 1024;
+        private const int ChunkSize = 256 * 1024;       // SignalR 中继分块大小 256KB（原 16KB，减少信令开销）
         private const long MaxBrowserFileSize = 512_000L * 1000;
+        private const int StreamReadBufferSize = 64 * 1024; // 读取浏览器文件时的缓冲区大小
 
         private bool _isLoading;
         private int _roomId;
@@ -20,13 +30,16 @@ namespace TransferMulti.wasm.Pages
         private readonly CancellationTokenSource _transferCts = new();
         private ParallelFileTransferQueue _transferQueue = null!;
 
+        [Inject]
+        private ILogger<FileTransferSender> Logger { get; set; } = null!;
+
         protected ElementReference UploadElement { get; set; }
         protected InputFile? inputFile { get; set; }
 
         protected override async Task OnInitializedAsync()
         {
             await base.OnInitializedAsync();
-            System.Console.WriteLine("Preparation a l'initialisation de la salle....");
+            Logger.LogInformation("准备初始化发送端房间...");
 
             _objRef = DotNetObjectReference.Create(this);
             _hub = new HubConnectionBuilder()
@@ -36,7 +49,7 @@ namespace TransferMulti.wasm.Pages
 
             _hub.On<int>("ReceiverJoined", async _ =>
             {
-                System.Console.WriteLine("Entree du destinataire");
+                Logger.LogInformation("接收方已加入房间 {RoomId}", _roomId);
                 _isReceiverJoined = true;
                 await InvokeAsync(StateHasChanged);
                 await JSRuntime.InvokeVoidAsync("createSenderConnection");
@@ -44,13 +57,13 @@ namespace TransferMulti.wasm.Pages
 
             _hub.On<string>("ReceiveReceiverIceCandidate", async candidate =>
             {
-                System.Console.WriteLine("Reception des informations ICE du destinataire");
+                Logger.LogDebug("收到接收方 ICE 候选");
                 await JSRuntime.InvokeVoidAsync("receiveIceCandidate", candidate);
             });
 
             _hub.On<string>("ReceiveAnswer", async answer =>
             {
-                System.Console.WriteLine("Reception de la reponse WebRTC");
+                Logger.LogDebug("收到 WebRTC Answer");
                 await JSRuntime.InvokeVoidAsync("receiveAnswer", answer);
             });
 
@@ -62,7 +75,7 @@ namespace TransferMulti.wasm.Pages
 
             _transferQueue = new ParallelFileTransferQueue(_files, MaxParallelTransfers);
             StartQueueWorkers();
-            System.Console.WriteLine("En attente de l'arrivee du destinataire....");
+            Logger.LogInformation("等待接收方加入，房间号: {RoomId}", _roomId);
         }
 
         private void StartQueueWorkers()
@@ -95,34 +108,35 @@ namespace TransferMulti.wasm.Pages
 
         private async Task SendFileWithWebRtcAsync(FileTransferInfo file)
         {
-            // 控制消息只发送元数据；文件内容会通过 file.Id 对应的独立 DataChannel 发送。
+            // 控制消息只发送元数据；文件内容通过 file.Id 对应的独立 DataChannel 发送。
             await JSRuntime.InvokeVoidAsync(
                 "sendFile",
                 file.Id,
                 CreateFileMetadataPayload(file),
-                file.FileContext.ToArray());
+                file.FileContext!);
         }
 
         private async Task SendFileWithSignalRAsync(FileTransferInfo file, CancellationToken cancellationToken)
         {
             await _hub.InvokeAsync("SendFileInfo", _roomId, file.Id, CreateFileMetadataPayload(file));
 
-            var totalBytesSent = 0;
-            for (var offset = 0; offset < file.FileContext.Count; offset += ChunkSize)
+            var fileSize = file.FileContext!.Length;
+            var totalBytesSent = 0L;
+            for (var offset = 0; offset < fileSize; offset += ChunkSize)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var remainingBytes = file.FileContext.Count - offset;
-                var chunkToSend = Math.Min(ChunkSize, remainingBytes);
+                var remainingBytes = fileSize - offset;
+                var chunkToSend = (int)Math.Min(ChunkSize, remainingBytes);
                 var chunk = new byte[chunkToSend];
-                file.FileContext.CopyTo(offset, chunk, 0, chunkToSend);
+                Buffer.BlockCopy(file.FileContext, offset, chunk, 0, chunkToSend);
 
                 await _hub.InvokeAsync("SendFile", _roomId, file.Id, chunk);
 
                 totalBytesSent += chunkToSend;
-                file.TransferProgress = file.FileSize == 0
+                file.TransferProgress = fileSize == 0
                     ? 100
-                    : (double)totalBytesSent / file.FileSize * 100;
+                    : (double)totalBytesSent / fileSize * 100;
 
                 await InvokeAsync(StateHasChanged);
                 await Task.Delay(1, cancellationToken);
@@ -177,7 +191,7 @@ namespace TransferMulti.wasm.Pages
                 return null;
             }
 
-            var fileSize = checked((int)browserFile.Size);
+            var fileSize = browserFile.Size;
             var file = new FileTransferInfo
             {
                 Id = Guid.NewGuid().ToString(),
@@ -186,21 +200,23 @@ namespace TransferMulti.wasm.Pages
                 UploadProgress = 0
             };
 
-            var readBuffer = new byte[1024 * 512];
-            var fileBuffer = new byte[fileSize];
-
-            var totalRead = 0;
+            // 预分配精确大小的 byte[]，避免 List<byte> 的扩容开销
+            var fileBuffer = new byte[(int)fileSize];
+            var totalRead = 0L;
             await using var stream = browserFile.OpenReadStream(MaxBrowserFileSize);
-            int bytesRead;
-            while ((bytesRead = await stream.ReadAsync(readBuffer, 0, readBuffer.Length)) > 0)
+
+            while (totalRead < fileSize)
             {
-                Buffer.BlockCopy(readBuffer, 0, fileBuffer, totalRead, bytesRead);
+                var bytesRead = await stream.ReadAsync(fileBuffer, (int)totalRead,
+                    (int)Math.Min(StreamReadBufferSize, fileSize - totalRead));
+                if (bytesRead == 0) break;
+
                 totalRead += bytesRead;
                 file.UploadProgress = fileSize == 0 ? 100 : totalRead * 100d / fileSize;
                 await InvokeAsync(StateHasChanged);
             }
 
-            file.FileContext = new List<byte>(fileBuffer);
+            file.FileContext = fileBuffer;
             file.SHA1 = await HashServiceFactory.Create(HashTypeEnum.SHA1).ComputeHashAsync(fileBuffer, false);
             return file;
         }
@@ -208,17 +224,17 @@ namespace TransferMulti.wasm.Pages
         [JSInvokable]
         public async Task SendIceCandidateToServer(string candidate)
         {
-            System.Console.WriteLine("Pret a envoyer le candidat ICE de l'emetteur");
+            Logger.LogDebug("发送 ICE 候选到服务器");
             var result = await _hub.InvokeAsync<string>("SendSenderIceCandidate", _roomId, candidate);
-            System.Console.WriteLine($"Reponse du serveur : {result}");
+            Logger.LogDebug("服务器响应: {Result}", result);
         }
 
         [JSInvokable]
         public async Task SendOfferToServer(string offer)
         {
-            System.Console.WriteLine("Pret a envoyer l'offre WebRTC");
+            Logger.LogDebug("发送 WebRTC Offer");
             var result = await _hub.InvokeAsync<string>("SendOffer", _roomId, offer);
-            System.Console.WriteLine($"Reponse du serveur : {result}");
+            Logger.LogDebug("服务器响应: {Result}", result);
         }
 
         [JSInvokable]
@@ -231,14 +247,16 @@ namespace TransferMulti.wasm.Pages
             }
 
             _connectionType = ConnectionTypeEnum.WebRTC;
+            Logger.LogInformation("WebRTC 连接已建立");
             await InvokeAsync(StateHasChanged);
         }
 
         public async Task EnableServiceRelay()
         {
             _connectionType = ConnectionTypeEnum.ServiceRelay;
+            Logger.LogInformation("切换到服务端中继模式");
             var result = await _hub.InvokeAsync<string>("SwitchConnectionType", _roomId);
-            System.Console.WriteLine($"Reponse du serveur : {result}");
+            Logger.LogDebug("SwitchConnectionType 响应: {Result}", result);
             await InvokeAsync(StateHasChanged);
         }
 
@@ -292,6 +310,7 @@ namespace TransferMulti.wasm.Pages
 
             file.State = FileTransferStateEnum.Sent;
             file.TransferProgress = 100;
+            Logger.LogInformation("文件发送完成: {FileName}", file.FileName);
             await InvokeAsync(StateHasChanged);
         }
 
@@ -323,6 +342,7 @@ namespace TransferMulti.wasm.Pages
         public void Dispose()
         {
             _transferCts.Cancel();
+            _transferCts.Dispose();
             _objRef?.Dispose();
 
             if (_hub is not null)
